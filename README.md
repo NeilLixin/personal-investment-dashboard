@@ -14,6 +14,9 @@
 - 资产配置：当前比例与目标区间对比。
 - 风险雷达：现金、集中度、高风险仓位、黄金/科技仓位、浮亏和操作频率规则。
 - 数据备份：CSV 压缩包和完整 SQLite 备份。
+- 数据同步：把核心表导出为 `data/sync/portfolio_sync.json`，用于私有 GitHub 跨设备同步。
+- 投资日报：汇总资产、风险、计划和复盘提醒，可保存或下载 Markdown。
+- 风险与复盘：0-100 风险分、可调阈值、月度/情绪/标签统计图表。
 
 ## 功能截图说明
 
@@ -48,6 +51,8 @@ pip install rapidocr-onnxruntime
 
 OCR 不可用时，截图导入页会显示原因，并提供“手动粘贴 OCR 文本”。OCR 解析结果不会直接入库，必须先在确认表格中人工检查。
 
+安装完成后必须重启 Streamlit。截图导入支持多图预览、逐张 OCR、可选的“上传后自动 OCR”和逐图错误提示；自动 OCR 默认关闭。即使 OCR 依赖缺失，上传图片后按钮仍可点击，并会显示安装命令，不会让页面崩溃。
+
 ## Demo 数据与测试
 
 ```powershell
@@ -70,7 +75,9 @@ python scripts\export_backup.py
 ## 数据安全
 
 - 默认数据库：`data/investment_dashboard.db`。
-- 截图、数据库、备份、导出文件和 `.env` 均被 `.gitignore` 排除。
+- 仅 `data/sync/portfolio_sync.json` 会作为结构化快照提交；它包含真实投资数据。
+- 截图、SQLite 数据库、备份、导出文件、上传文件和 `.env` 均被 `.gitignore` 排除。
+- 私有仓库不等于绝对安全，禁止把仓库设为 public，禁止提交 token、截图或 `.env`。
 - 不要提交真实资产数据、账户信息、截图原图、API Key 或 Cookie。
 - 页面只在本机使用，不建议暴露到公网。
 
@@ -84,6 +91,14 @@ git branch -M main
 git remote add origin <你的GitHub仓库地址>
 git push -u origin main
 ```
+
+## Mac / Windows 跨设备同步
+
+Mac：`git pull` → `python scripts/start.py` → 页面修改数据 → “数据同步”导出 → “GitHub 同步”提交推送。
+
+Windows：`git pull` → `python scripts\start.py` → “数据同步”预览 → 选择合并或覆盖并确认导入。反向同步步骤相同。覆盖和合并导入前都会自动备份本地数据库。
+
+投资日报页点击“生成日报”，可复制、下载或保存 Markdown；风险雷达页可维护基础阈值；复盘中心可快速填写结果并查看统计图表。
 
 后续同步：
 
@@ -102,7 +117,9 @@ git config --local https.proxy http://127.0.0.1:7897
 
 ### 页面能开，但 OCR 不可用
 
-安装 `requirements-ocr.txt` 后重启 Streamlit。仍失败时可以直接粘贴 OCR 文本，不影响其他功能。
+确认已激活当前项目虚拟环境，再执行 `pip install -r requirements-ocr.txt`，然后彻底停止并重启 Streamlit。页面会区分“依赖不可用”和“初始化失败”，并显示底层错误。仍失败时可使用 iPhone/支付宝的文字识别，把结果粘贴到 OCR 原文区域，不影响后续人工确认导入。
+
+如果图片已上传但无法识别，请检查文件是否为 PNG/JPG/JPEG/WebP、图片是否损坏，以及终端启动 Streamlit 的 Python 是否就是安装 OCR 依赖的虚拟环境。
 
 ### OCR 解析不准确
 

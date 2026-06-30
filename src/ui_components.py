@@ -47,7 +47,7 @@ def rate_metric(label: str, value: float, signed: bool = False) -> None:
 
 def risk_cards(items: list[dict]) -> None:
     for item in items:
-        css = "risk-danger" if item["level"] == "danger" else "risk-normal" if item["level"] == "normal" else ""
+        css = "risk-danger" if item["level"] in ("danger", "red") else "risk-normal" if item["level"] in ("normal", "green") else ""
         st.markdown(
             f'<div class="risk-card {css}"><b>{item["icon"]} {item["title"]}</b><br>{item["message"]}'
             f'<div class="small-muted">建议：{item["suggestion"]}</div></div>', unsafe_allow_html=True,

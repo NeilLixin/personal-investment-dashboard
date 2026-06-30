@@ -82,6 +82,14 @@ def _parse_block(lines: list[str]) -> dict[str, Any] | None:
                 value = _value_after_label(lines, index, field_labels)
                 result[field] = value if field in {"name", "code"} else parse_number(value)
     if not result["name"]:
+        amount_index = next((i for i, line in enumerate(lines) if any(label in line for label in labels["current_value"])), -1)
+        generic_titles = {"我的资产", "总资产", "基金", "理财", "黄金", "持有详情", "资产详情"}
+        if amount_index > 0:
+            result["name"] = next(
+                (line for line in reversed(lines[:amount_index]) if line not in generic_titles and 2 <= len(line) <= 40
+                 and not re.search(r"^[-+¥￥\d,.%]+$", line)), None
+            )
+    if not result["name"]:
         candidates = [line for line in lines if not any(label in line for values in labels.values() for label in values)]
         result["name"] = next((line for line in candidates if 2 <= len(line) <= 40 and not re.search(r"^[-+¥￥\d,.%]+$", line)), None)
     if not result["name"] or result["current_value"] is None:

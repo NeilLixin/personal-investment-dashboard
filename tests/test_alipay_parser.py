@@ -46,3 +46,15 @@ def test_parse_multiple_products() -> None:
     assert len(results) == 2
     assert results[0]["asset_type"] == "海外资产"
     assert results[1]["asset_type"] == "债券/固收"
+
+
+def test_incomplete_ocr_text_uses_nearby_name_fallback() -> None:
+    text = """我的资产
+中证A500指数基金
+持有金额
+6,666.00
+部分文字识别不完整"""
+    result = parse_alipay_text(text)
+    assert len(result) == 1
+    assert result[0]["name"] == "中证A500指数基金"
+    assert result[0]["current_value"] == pytest.approx(6666.0)

@@ -23,6 +23,10 @@ CREATE TABLE IF NOT EXISTS trades (
     id INTEGER PRIMARY KEY AUTOINCREMENT, trade_date TEXT NOT NULL, asset_name TEXT NOT NULL,
     action TEXT NOT NULL, amount REAL DEFAULT 0, price REAL DEFAULT 0, reason TEXT,
     emotion TEXT, plan_id INTEGER, review_date TEXT, review_result TEXT,
+    is_planned INTEGER DEFAULT 0, review_status TEXT DEFAULT 'pending',
+    result_type TEXT DEFAULT '未判断', result_amount REAL, result_rate REAL,
+    mistake_tags TEXT DEFAULT '[]', success_tags TEXT DEFAULT '[]', lesson TEXT,
+    confidence_score INTEGER, discipline_score INTEGER,
     created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS plans (
@@ -64,6 +68,16 @@ def connection(db_path: Path = DATABASE_PATH):
 def init_db(db_path: Path = DATABASE_PATH) -> None:
     with connection(db_path) as conn:
         conn.executescript(SCHEMA)
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(trades)")}
+        migrations = {
+            "is_planned": "INTEGER DEFAULT 0", "review_status": "TEXT DEFAULT 'pending'",
+            "result_type": "TEXT DEFAULT '未判断'", "result_amount": "REAL", "result_rate": "REAL",
+            "mistake_tags": "TEXT DEFAULT '[]'", "success_tags": "TEXT DEFAULT '[]'", "lesson": "TEXT",
+            "confidence_score": "INTEGER", "discipline_score": "INTEGER",
+        }
+        for name, definition in migrations.items():
+            if name not in columns:
+                conn.execute(f"ALTER TABLE trades ADD COLUMN {name} {definition}")
 
 
 def fetch_all(table: str, db_path: Path = DATABASE_PATH, order_by: str = "id DESC") -> list[dict]:

@@ -8,6 +8,14 @@ data/*.db-*
 data/uploads/
 data/backups/
 data/exports/
+# Structured cross-device snapshots are intentionally versioned; raw/local data stays ignored.
+!data/sync/
+!data/sync/.gitkeep
+!data/sync/portfolio_sync.json
+*.png
+*.jpg
+*.jpeg
+*.webp
 *.log
 .DS_Store
 .idea/

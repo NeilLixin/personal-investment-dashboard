@@ -10,10 +10,10 @@ def test_low_cash_and_concentration_rules() -> None:
     titles = {item["title"] for item in risks}
     assert "现金比例过低" in titles
     assert "单一资产占比过高" in titles
-    assert "科技仓位超过目标" in titles
+    assert "科技仓位超配" in titles
 
 
-def test_normal_portfolio_returns_normal_signal() -> None:
+def test_diversified_portfolio_has_no_red_signal() -> None:
     holdings = [
         {"name": "现金", "asset_type": "现金", "current_value": 20, "cost_amount": 20, "target_min_ratio": 0.1, "target_max_ratio": 0.3, "risk_level": "低"},
         {"name": "宽基", "asset_type": "A股宽基", "current_value": 25, "cost_amount": 24, "target_min_ratio": 0.1, "target_max_ratio": 0.4, "risk_level": "中"},
@@ -22,4 +22,4 @@ def test_normal_portfolio_returns_normal_signal() -> None:
         {"name": "黄金", "asset_type": "黄金", "current_value": 15, "cost_amount": 14, "target_min_ratio": 0.05, "target_max_ratio": 0.2, "risk_level": "中"},
     ]
     risks = evaluate_risks(holdings)
-    assert any(item["level"] == "normal" for item in risks)
+    assert not any(item["level"] == "red" for item in risks)

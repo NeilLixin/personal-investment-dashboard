@@ -7,7 +7,9 @@ DATABASE_PATH = DATA_DIR / "investment_dashboard.db"
 UPLOADS_DIR = DATA_DIR / "uploads"
 BACKUPS_DIR = DATA_DIR / "backups"
 EXPORTS_DIR = DATA_DIR / "exports"
-APP_VERSION = "0.1.0"
+SYNC_DIR = DATA_DIR / "sync"
+SYNC_FILE = SYNC_DIR / "portfolio_sync.json"
+APP_VERSION = "0.2.0"
 
 ASSET_TYPES = [
     "现金",
@@ -19,7 +21,7 @@ ASSET_TYPES = [
     "其他",
 ]
 MARKETS = ["A股", "美股", "黄金", "现金", "其他"]
-PLATFORMS = ["支付宝", "券商", "招商银行", "浙商银行", "京东金融", "手动"]
+PLATFORMS = ["支付宝", "券商", "招商银行", "浙商银行", "京东金融", "手动", "其他"]
 RISK_LEVELS = ["低", "中", "高"]
 TRADE_ACTIONS = ["买入", "卖出", "定投", "减仓", "补仓", "观察"]
 EMOTIONS = ["冷静", "恐慌", "怕踏空", "冲动", "按计划"]
@@ -27,5 +29,5 @@ PLAN_TYPES = ["补仓", "减仓", "止盈", "止损", "定投", "观察"]
 
 
 def ensure_directories() -> None:
-    for path in (DATA_DIR, UPLOADS_DIR, BACKUPS_DIR, EXPORTS_DIR):
+    for path in (DATA_DIR, UPLOADS_DIR, BACKUPS_DIR, EXPORTS_DIR, SYNC_DIR):
         path.mkdir(parents=True, exist_ok=True)

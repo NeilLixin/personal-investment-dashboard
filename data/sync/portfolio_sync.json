@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "exported_at": null,
+  "exported_from_os": null,
+  "exported_from_hostname": null,
+  "app_version": "0.2.0",
+  "holdings": [],
+  "trades": [],
+  "plans": [],
+  "rules": [],
+  "app_settings": [],
+  "asset_allocation_targets": null,
+  "review_stats_config": null,
+  "daily_report_config": null
+}

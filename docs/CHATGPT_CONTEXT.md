@@ -9,3 +9,6 @@
 边界：不接 OpenAI API，不抓行情，不接券商，不自动交易，不保证收益。真实数据库、截图、备份、导出、`.env` 和账户信息不得提交 Git。
 
 接手时先读 `docs/AI_HANDOFF.md` 和 `docs/PROJECT_STATE.md`，运行 `pytest`，然后执行 `streamlit run app.py`。数据库变更要兼容旧数据；parser 变更必须补测试。
+# v0.2.0 上下文
+
+当前新增数据同步、投资日报、风险评分和复盘统计。可提交的数据文件仅为 `data/sync/portfolio_sync.json`；`data/investment_dashboard.db`、`data/uploads/`、`data/backups/`、`data/exports/`、截图、日志、`.env` 和 token 不提交。跨设备顺序为：拉取代码 → 启动应用 → 预览/导入；修改后导出快照 → 提交推送。项目仅做个人记录和辅助决策，不构成投资建议，不保证收益，不自动交易。

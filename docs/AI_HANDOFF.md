@@ -6,10 +6,11 @@
 
 这是本地“一人投资驾驶舱”：管理持仓、观察资产配置、约束仓位风险、记录买卖计划与操作复盘。它不是投资建议系统、自动赚钱机器或自动交易程序；不连接券商、不自动买卖、不抓行情、不调用 OpenAI API。
 
-## v0.1.0 已完成
+## v0.2.0 已完成
 
 - Streamlit 九页中文界面：总览、持仓、截图导入、计划、日记、复盘、配置、风险和设置。
 - SQLite 自动初始化及 holdings、trades、plans、rules、ocr_import_batches、app_settings 表。
+- 结构化 JSON 跨设备同步、投资日报、风险评分与复盘统计；旧 trades 表启动时自动迁移。
 - 持仓收益、收益率、资产占比和目标区间计算。
 - Plotly 资产配置、平台分布、盈亏和集中度图表。
 - 本地规则风险雷达。
@@ -48,9 +49,13 @@ streamlit run app.py
 
 ## OCR 方案
 
-`src/ocr_engine.py` 尝试懒加载 `rapidocr-onnxruntime`。依赖缺失或初始化失败不能阻止应用启动。截图导入始终提供手动文本兜底；OCR 原文会保留在批次记录，解析草稿必须人工确认后才进入 holdings。安装：`pip install -r requirements-ocr.txt`。
+`src/ocr_engine.py` 可选加载 `rapidocr-onnxruntime`，Streamlit 进程内只初始化一次。依赖缺失或初始化失败不能阻止应用启动。截图导入始终提供手动文本兜底；OCR 原文会保留在批次记录，解析草稿必须人工确认后才进入 holdings。安装：`pip install -r requirements-ocr.txt`。
+
+安装后必须重启 Streamlit。页面支持多图逐张识别、自动 OCR 开关、逐图结果与错误；按钮只在没有上传文件时禁用，OCR 依赖缺失时点击按钮会显示安装方式。UploadedFile 读取后会复位到开头，单张坏图不会中断其他图片。
 
 ## GitHub 同步
+
+`data/sync/portfolio_sync.json` 是唯一允许提交的运行时数据快照，包含核心投资数据。数据库、uploads、backups、exports、截图、`.env` 与 token 仍禁止提交。私有仓库不得改为 public。
 
 首次上传按 README 执行 `git init` 和 remote 配置。后续使用：
 
