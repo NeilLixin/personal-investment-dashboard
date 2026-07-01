@@ -19,6 +19,7 @@ CHINESE_COLUMNS = {
     "review_result":"复盘结果", "status":"状态", "level":"风险等级", "title":"风险项", "description":"说明",
     "evidence":"依据", "suggestion":"建议", "score":"分数", "ratio":"占比", "target":"目标区间", "deviation":"偏离",
     "plan_type":"计划类型", "trigger_condition":"触发条件", "trigger_value":"触发值", "suggested_action":"建议动作", "priority":"优先级",
+    "enabled":"是否启用", "quantity":"数量/份额", "confidence_score":"信心分", "discipline_score":"纪律分",
 }
 
 

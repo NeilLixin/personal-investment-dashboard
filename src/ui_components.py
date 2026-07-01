@@ -33,6 +33,40 @@ def page_header(title: str, subtitle: str) -> None:
     st.markdown(f'<div class="hero"><h1>{title}</h1><p>{subtitle}</p></div>', unsafe_allow_html=True)
 
 
+def section_title(title: str, help_text: str = "") -> None:
+    st.subheader(title)
+    if help_text: st.caption(help_text)
+
+
+def status_badge(text: str, level: str = "green") -> str:
+    icons = {"green":"🟢", "yellow":"🟡", "red":"🔴"}
+    return f"{icons.get(level, '🟢')} {text}"
+
+
+def empty_state(message: str) -> None:
+    st.info(message)
+
+
+def compact_help(message: str) -> None:
+    st.caption(message)
+
+
+def risk_badge(level: str) -> str:
+    return status_badge({"green":"正常", "yellow":"注意", "red":"危险"}.get(level, level), level)
+
+
+def money_format(value: float, signed: bool = False) -> str:
+    return format_currency(value, signed)
+
+
+def percent_format(value: float, signed: bool = False) -> str:
+    return format_rate(value, signed)
+
+
+def advanced_expander(label: str = "高级信息"):
+    return st.expander(label, expanded=False)
+
+
 def metric_card(label: str, value: str, tone: str = "") -> None:
     st.markdown(f'<div class="metric-card"><div class="metric-label">{label}</div><div class="metric-value {tone}">{value}</div></div>', unsafe_allow_html=True)
 

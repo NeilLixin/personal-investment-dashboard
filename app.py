@@ -12,7 +12,7 @@ import streamlit as st
 from src.alipay_parser import parse_alipay_text
 from src.alipay_fund_parser import parse_alipay_fund_holdings_from_ocr_items
 from src.eastmoney_parser import parse_eastmoney_holdings_from_ocr_items
-from src.calculations import calculate_profit, enrich_holdings, format_currency, format_rate, portfolio_summary, safe_float
+from src.calculations import allocation_status, apply_holding_operation, calculate_profit, enrich_holdings, format_currency, format_rate, portfolio_summary, safe_float
 from src.config import (
     APP_VERSION, ASSET_TYPES, DATABASE_PATH, EMOTIONS, MARKETS, PLAN_TYPES, PLATFORMS,
     RISK_LEVELS, TRADE_ACTIONS, ensure_directories,
@@ -22,7 +22,7 @@ from src.database import (
     now_text, set_setting, update_row,
 )
 from src.export_service import backup_database, export_all_csv_zip
-from src.import_service import import_holding_drafts, parsed_to_drafts
+from src.import_service import dedupe_import_holdings, import_holding_drafts, parsed_to_drafts
 from src.image_preprocess import (
     crop_alipay_fund_area,
     load_image_from_uploaded_file,
@@ -30,6 +30,7 @@ from src.image_preprocess import (
     save_ocr_debug_images,
     split_alipay_fund_rows,
 )
+from src.git_service import run_git_action
 from src.ocr_engine import LocalOCREngine
 from src.rule_engine import evaluate_risks, risk_summary, system_suggestions
 from src.report_service import generate_daily_report, localize_records, save_daily_report
@@ -104,11 +105,16 @@ def dashboard_page() -> None:
     left, right = st.columns(2)
     with left:
         allocation = frame.groupby("asset_type", as_index=False)["current_value"].sum()
-        fig = px.pie(allocation, names="asset_type", values="current_value", hole=.55, title="资产类型配置")
+        fig = px.pie(allocation, names="asset_type", values="current_value", hole=.55, title="资产类型配置", labels={"asset_type":"资产类型", "current_value":"当前市值"})
         st.plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
+        targets = get_setting("target_allocations", DEFAULT_ALLOCATION); total = max(float(frame["current_value"].sum()), 1)
+        allocation["当前占比"] = allocation["current_value"] / total
+        allocation["目标区间"] = allocation["asset_type"].map(lambda x:f"{targets.get(x, {'min':0,'max':1})['min']:.0%}-{targets.get(x, {'min':0,'max':1})['max']:.0%}")
+        allocation["配置状态"] = allocation.apply(lambda x: allocation_status(x["当前占比"], targets.get(x["asset_type"], {"min":0})["min"], targets.get(x["asset_type"], {"max":1})["max"]), axis=1)
+        st.dataframe(allocation[["asset_type", "当前占比", "目标区间", "配置状态"]].rename(columns={"asset_type":"资产类型"}), hide_index=True, width="stretch", column_config={"当前占比":st.column_config.NumberColumn(format="%.2%%")})
     with right:
         platforms = frame.groupby("platform", as_index=False)["current_value"].sum()
-        fig = px.bar(platforms, x="platform", y="current_value", color="platform", title="平台资产分布")
+        fig = px.bar(platforms, x="platform", y="current_value", color="platform", title="平台资产分布", labels={"platform":"平台", "current_value":"当前市值"})
         fig.update_layout(showlegend=False, yaxis_title="当前市值")
         st.plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
     left, right = st.columns([1.3, 1])
@@ -160,9 +166,17 @@ def holding_form(prefix: str, initial: dict | None = None) -> dict | None:
 
 
 def holdings_page() -> None:
-    page_header("📦 持仓管理", "录入、筛选和维护全部资产；收益率与资产占比自动计算。")
+    page_header("📦 持仓工作台", "查看组合、记录操作、管理计划和调整持仓设置。")
     show_flash()
     records, frame = holdings_data()
+    trades = fetch_all("trades", order_by="trade_date DESC, id DESC")
+    summary = portfolio_summary(records); risks = evaluate_risks(records, trades)
+    pending = [row for row in trades if row.get("review_status", "pending") == "pending" and not row.get("review_result")]
+    cards = st.columns(7)
+    values = [format_currency(summary["total_asset"]), format_currency(summary["total_profit"], True), format_rate(summary["profit_rate"], True),
+              format_rate(summary["cash_ratio"]), str(len(records)), str(sum(r["level"] == "red" for r in risks)), str(len(pending))]
+    for col, label, value in zip(cards, ["总资产", "总浮盈亏", "总收益率", "现金比例", "持仓数量", "红色风险", "待复盘"], values):
+        with col: metric_card(label, value)
     with st.expander("➕ 新增持仓", expanded=not records):
         payload = holding_form("add_holding")
         if payload:
@@ -179,32 +193,89 @@ def holdings_page() -> None:
         if not frame.empty:
             st.download_button("下载当前持仓 CSV", frame.to_csv(index=False).encode("utf-8-sig"), "holdings.csv", "text/csv")
     if frame.empty:
-        st.info("暂无持仓。")
+        st.info("暂无持仓，请先手动新增或上传截图导入。")
         return
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4, c5 = st.columns(5)
     platform_filter = c1.multiselect("平台筛选", sorted(frame["platform"].dropna().unique()))
     type_filter = c2.multiselect("资产类型筛选", sorted(frame["asset_type"].dropna().unique()))
-    sort_key = c3.selectbox("排序", ["市值从高到低", "收益从高到低", "收益从低到高"])
+    risk_filter = c3.multiselect("风险等级", RISK_LEVELS)
+    profit_filter = c4.selectbox("盈亏状态", ["全部", "盈利", "亏损", "持平"])
+    sort_key = c5.selectbox("排序", ["当前市值", "浮盈亏", "收益率", "持仓占比"])
     display = frame.copy()
     if platform_filter: display = display[display["platform"].isin(platform_filter)]
     if type_filter: display = display[display["asset_type"].isin(type_filter)]
-    display = display.sort_values("current_value" if sort_key == "市值从高到低" else "profit_amount", ascending=sort_key == "收益从低到高")
-    shown = display[["name", "code", "platform", "asset_type", "current_value", "cost_amount", "profit_amount", "profit_rate", "asset_ratio", "display_status"]].copy()
-    shown.columns = ["名称", "代码", "平台", "资产类型", "当前市值", "成本", "浮盈亏", "收益率", "资产占比", "状态"]
-    st.dataframe(shown, width="stretch", hide_index=True, column_config={"当前市值": st.column_config.NumberColumn(format="¥%.2f"), "成本": st.column_config.NumberColumn(format="¥%.2f"), "浮盈亏": st.column_config.NumberColumn(format="¥%.2f"), "收益率": st.column_config.NumberColumn(format="%.2%%"), "资产占比": st.column_config.NumberColumn(format="%.2%%")})
-    st.subheader("编辑 / 删除")
+    if risk_filter: display = display[display["risk_level"].isin(risk_filter)]
+    if profit_filter != "全部": display = display[(display["profit_amount"] > 0) if profit_filter == "盈利" else (display["profit_amount"] < 0) if profit_filter == "亏损" else (display["profit_amount"] == 0)]
+    display = display.sort_values({"当前市值":"current_value", "浮盈亏":"profit_amount", "收益率":"profit_rate", "持仓占比":"asset_ratio"}[sort_key], ascending=False)
+    category_tabs = st.tabs(["全部持仓", "A股", "海外", "黄金", "现金/固收", "高风险"])
+    tab_frames = [display, display[display["market"] == "A股"], display[display["asset_type"] == "海外资产"], display[display["asset_type"] == "黄金"],
+                  display[display["asset_type"].isin(["现金", "债券/固收"])], display[display["risk_level"] == "高"]]
+    for tab, tab_frame in zip(category_tabs, tab_frames):
+        with tab:
+            if tab_frame.empty: st.info("当前分类暂无持仓。")
+            else:
+                shown = tab_frame[["name", "platform", "asset_type", "current_value", "cost_amount", "profit_amount", "profit_rate", "holding_share", "latest_price", "asset_ratio", "risk_level", "display_status", "allocation_status"]].copy()
+                shown.columns = ["名称", "平台", "资产类型", "当前市值", "成本金额", "浮盈亏", "收益率", "持有份额", "最新价", "持仓占比", "风险等级", "状态", "配置状态"]
+                shown.insert(7, "昨日/今日收益", tab_frame.get("daily_profit"))
+                shown["操作"] = "在下方选择持仓"
+                st.dataframe(shown, width="stretch", hide_index=True, column_config={"当前市值":st.column_config.NumberColumn(format="¥%.2f"), "成本金额":st.column_config.NumberColumn(format="¥%.2f"), "浮盈亏":st.column_config.NumberColumn(format="%+.2f"), "收益率":st.column_config.NumberColumn(format="%+.2%%"), "持仓占比":st.column_config.NumberColumn(format="%.2%%")})
+    st.subheader("持仓详情")
     choices = {f"#{row['id']} {row['name']}": int(row["id"]) for row in records}
-    selected_label = st.selectbox("选择持仓", list(choices))
+    selected_label = st.selectbox("选择要操作的持仓", list(choices))
     selected_id = choices[selected_label]
     initial = get_row("holdings", selected_id)
-    with st.expander("编辑所选持仓"):
+    quick_tab, plan_tab, trade_tab, review_tab, setting_tab = st.tabs(["快速操作", "买卖计划", "操作记录", "复盘记录", "持仓设置"])
+    with quick_tab:
+        with st.form(f"quick_operation_{selected_id}"):
+            c1, c2, c3, c4 = st.columns(4); action = c1.selectbox("操作类型", TRADE_ACTIONS); amount = c2.number_input("金额", min_value=0.0); quantity = c3.number_input("数量/份额", min_value=0.0); price = c4.number_input("价格", min_value=0.0, format="%.4f")
+            reason = st.text_area("操作原因"); c1, c2, c3 = st.columns(3); emotion = c1.selectbox("情绪", EMOTIONS); planned = c2.checkbox("是否按计划"); review_date = c3.date_input("复盘日期", date.today()); note = st.text_input("备注")
+            c1, c2 = st.columns(2); record_only = c1.form_submit_button("仅记录操作", type="primary", width="stretch"); record_update = c2.form_submit_button("记录并更新持仓", width="stretch")
+        if record_only or record_update:
+            insert_row("trades", {"trade_date":date.today().isoformat(), "asset_name":initial["name"], "action":action, "amount":amount, "quantity":quantity or None,
+                "price":price or None, "reason":reason, "emotion":emotion, "is_planned":int(planned), "review_date":review_date.isoformat(), "review_status":"pending", "note":note})
+            if record_update and action != "观察":
+                changed = apply_holding_operation(initial, action, amount, quantity, price)
+                update_row("holdings", selected_id, {key:changed.get(key) for key in ("current_value", "cost_amount", "profit_amount", "profit_rate", "holding_share", "latest_price")})
+            rerun_with_message("操作已记录" + ("，持仓已更新。" if record_update and action != "观察" else "。"))
+    with plan_tab:
+        related = [p for p in fetch_all("plans") if p.get("asset_name") == initial["name"]]
+        if related: st.dataframe(pd.DataFrame(localize_records(related, ["plan_type", "trigger_condition", "trigger_value", "suggested_action", "priority", "enabled", "note"])), hide_index=True, width="stretch")
+        else: st.info("当前持仓暂无买卖计划。")
+        with st.form(f"holding_plan_{selected_id}"):
+            c1, c2, c3 = st.columns(3); kind = c1.selectbox("计划类型", PLAN_TYPES); trigger = c2.number_input("触发值"); priority = c3.selectbox("优先级", [1,2,3], format_func=lambda x:{1:"高",2:"中",3:"低"}[x]); condition = st.text_input("条件"); suggestion = st.text_input("建议动作"); enabled = st.checkbox("是否启用", True); plan_note = st.text_input("计划备注")
+            if st.form_submit_button("新增计划"):
+                insert_row("plans", {"asset_name":initial["name"], "plan_type":kind, "trigger_condition":condition, "trigger_value":trigger, "suggested_action":suggestion, "priority":priority, "enabled":int(enabled), "note":plan_note}); rerun_with_message("计划已新增。")
+    related_trades = [t for t in trades if t.get("asset_name") == initial["name"]]
+    with trade_tab:
+        if related_trades:
+            action_filter = st.multiselect("筛选操作类型", TRADE_ACTIONS, key=f"trade_filter_{selected_id}")
+            filtered_trades = [row for row in related_trades if not action_filter or row.get("action") in action_filter]
+            st.dataframe(pd.DataFrame(localize_records(filtered_trades, ["trade_date", "action", "amount", "quantity", "price", "reason", "emotion", "review_date", "note"])), hide_index=True, width="stretch")
+            trade_to_edit = st.selectbox("选择要编辑的记录", related_trades, format_func=lambda x:f"{x['trade_date']} · {x['action']} · {format_currency(x.get('amount', 0))}")
+            with st.expander("编辑所选操作记录"):
+                with st.form(f"edit_trade_{trade_to_edit['id']}"):
+                    edit_action = st.selectbox("操作类型", TRADE_ACTIONS, index=TRADE_ACTIONS.index(trade_to_edit["action"]) if trade_to_edit.get("action") in TRADE_ACTIONS else 0)
+                    edit_amount = st.number_input("金额", min_value=0.0, value=safe_float(trade_to_edit.get("amount")))
+                    edit_reason = st.text_area("操作原因", trade_to_edit.get("reason") or "")
+                    edit_emotion = st.selectbox("情绪", EMOTIONS, index=EMOTIONS.index(trade_to_edit["emotion"]) if trade_to_edit.get("emotion") in EMOTIONS else 0)
+                    if st.form_submit_button("保存操作记录"):
+                        update_row("trades", trade_to_edit["id"], {"action":edit_action, "amount":edit_amount, "reason":edit_reason, "emotion":edit_emotion}); rerun_with_message("操作记录已更新。")
+        else: st.info("暂无操作记录。")
+    with review_tab:
+        reviewed = [t for t in related_trades if t.get("review_result")]
+        if reviewed: st.dataframe(pd.DataFrame(localize_records(reviewed, ["trade_date", "action", "amount", "review_date", "review_result", "discipline_score"])), hide_index=True, width="stretch")
+        else: st.info("暂无复盘记录。")
+        pending_related = [t for t in related_trades if not t.get("review_result")]
+        if pending_related:
+            target = st.selectbox("选择待复盘操作", pending_related, format_func=lambda x:f"{x['trade_date']} · {x['action']}")
+            with st.form(f"holding_review_{target['id']}"):
+                result_text = st.text_area("复盘结果")
+                if st.form_submit_button("保存复盘"):
+                    update_row("trades", target["id"], {"review_result":result_text, "review_status":"done"}); rerun_with_message("复盘已保存。")
+    with setting_tab:
         payload = holding_form(f"edit_holding_{selected_id}", initial)
-        if payload:
-            save_holding(payload, selected_id)
-            rerun_with_message("持仓已更新。")
-    if st.button("删除所选持仓", type="secondary"):
-        delete_row("holdings", selected_id)
-        rerun_with_message("持仓已删除。")
+        if payload: save_holding(payload, selected_id); rerun_with_message("持仓设置已更新。")
+        if st.button("删除所选持仓", type="secondary"): delete_row("holdings", selected_id); rerun_with_message("持仓已删除。")
 
 
 def screenshot_import_page() -> None:
@@ -262,12 +333,14 @@ def screenshot_import_page() -> None:
                 else:
                     parsed_result = {"ok": False, "holdings": [], "debug": {"reason": "无法自动判断截图类型"}, "error": "无法判断截图类型"}
                 parsed.extend(parsed_result["holdings"]); debug.append({"文件": prepared["name"], "类型": screenshot_type, **parsed_result})
-            unique = {(x.get("platform"), x.get("name"), x.get("current_value")): x for x in parsed}
+            unique_rows, duplicate_count = dedupe_import_holdings(parsed)
             st.session_state["ocr_results"] = {"results": results, "errors": errors, "debug": debug}
-            st.session_state["ocr_drafts"] = parsed_to_drafts(unique.values())
-            st.session_state["ocr_parse_failed"] = not bool(unique)
+            st.session_state["ocr_drafts"] = parsed_to_drafts(unique_rows)
+            st.session_state["ocr_duplicate_count"] = duplicate_count
+            st.session_state["ocr_parse_failed"] = not bool(unique_rows)
         if parsed:
-            st.success(f"识别完成，共解析出 {len(unique)} 条持仓，请确认后导入。")
+            st.success(f"识别完成，共解析出 {len(unique_rows)} 条持仓，请确认后导入。")
+            if duplicate_count: st.warning("本次导入发现重复持仓，已默认使用最后一次识别结果。")
         elif results and any(item.get("ok") for item in results):
             st.warning("已识别到文字，但没有解析出完整持仓。请打开高级调试模式查看原因。")
         else:
@@ -297,6 +370,7 @@ def screenshot_import_page() -> None:
             st.session_state["ocr_drafts"] = parsed_to_drafts(parse_alipay_text(manual_text))
     drafts = st.session_state.get("ocr_drafts")
     if isinstance(drafts, pd.DataFrame) and not drafts.empty:
+        if st.session_state.get("ocr_duplicate_count"): st.warning("本次导入发现重复持仓，已默认使用最后一次识别结果。")
         st.subheader("待确认导入表格")
         display = drafts.rename(columns={"name":"名称", "code":"代码", "platform":"平台", "asset_type":"资产类型", "market":"市场",
             "current_value":"当前市值", "cost_amount":"成本金额", "profit_amount":"浮盈亏", "profit_rate":"收益率",
@@ -321,7 +395,7 @@ def screenshot_import_page() -> None:
             selected = edited[edited["选择"]].drop(columns=["选择"]).rename(columns=reverse)
             result = import_holding_drafts(selected.fillna("").to_dict("records"))
             st.session_state.pop("ocr_drafts", None)
-            rerun_with_message(f"导入完成：新增 {result['inserted']}，更新 {result['updated']}，跳过 {result['skipped']}，失败 0。")
+            rerun_with_message(f"导入完成：新增 {result['inserted']}，覆盖更新 {result['updated']}，跳过 {result['skipped']}，失败 {result['failed']}。")
 
 
 def plans_page() -> None:
@@ -480,7 +554,7 @@ def review_page() -> None:
         st.subheader("历史复盘")
         search = st.text_input("搜索历史复盘")
         if search: reviewed = reviewed[reviewed.astype(str).apply(lambda row: row.str.contains(search, case=False).any(), axis=1)]
-        st.dataframe(pd.DataFrame(localize_records(reviewed.to_dict("records"))), width="stretch", hide_index=True)
+        st.dataframe(pd.DataFrame(localize_records(reviewed.to_dict("records"), ["trade_date", "asset_name", "action", "amount", "reason", "emotion", "review_date", "review_result", "discipline_score"])), width="stretch", hide_index=True)
 
 
 def allocation_page() -> None:
@@ -541,7 +615,7 @@ def risk_page() -> None:
     if not frame.empty:
         c1, c2 = st.columns(2)
         concentration = frame.groupby("asset_type", as_index=False)["current_value"].sum()
-        c1.plotly_chart(px.pie(concentration, names="asset_type", values="current_value", hole=.45, title="资产集中度"), width="stretch", config=PLOTLY_CONFIG)
+        c1.plotly_chart(px.pie(concentration, names="asset_type", values="current_value", hole=.45, title="资产集中度", labels={"asset_type":"资产类型", "current_value":"当前市值"}), width="stretch", config=PLOTLY_CONFIG)
         high = frame.groupby("risk_level", as_index=False)["current_value"].sum()
         c2.plotly_chart(px.bar(high, x="risk_level", y="current_value", color="risk_level", title="高风险资产占比"), width="stretch", config=PLOTLY_CONFIG)
         c1, c2 = st.columns(2)
@@ -590,28 +664,27 @@ def daily_report_page() -> None:
         st.dataframe(pd.DataFrame(localize_records(report["plans"], ["asset_name", "plan_type", "trigger_condition", "trigger_value", "suggested_action", "priority", "note"])), width="stretch", hide_index=True)
     else:
         st.info("暂无启用计划。")
-    st.subheader("复制版 Markdown")
-    st.code(report["markdown"], language="markdown")
-    c1, c2 = st.columns(2)
-    if c1.button("保存日报", width="stretch"): st.success(f"已保存：{save_daily_report(report)}")
-    c2.download_button("下载 Markdown", report["markdown"].encode("utf-8"), f"daily_report_{report['date'].replace('-', '')}.md", "text/markdown", width="stretch")
+    with st.expander("导出 / 复制日报"):
+        st.caption("Markdown 适合复制到备忘录、Obsidian、Notion 或发给 ChatGPT 做复盘；如果你只在本工具里查看，可以不用管。")
+        st.code(report["markdown"], language="markdown")
+        c1, c2 = st.columns(2)
+        if c1.button("保存日报文件", width="stretch"): st.success(f"日报已保存：{save_daily_report(report).name}")
+        c2.download_button("下载 Markdown", report["markdown"].encode("utf-8"), f"daily_report_{report['date'].replace('-', '')}.md", "text/markdown", width="stretch")
 
 
 def sync_page() -> None:
-    page_header("🔄 数据同步", "在 Mac 与 Windows 之间同步持仓、计划、日记和设置。")
-    st.info("同步文件只包含持仓、计划、日记和设置，不包含截图、数据库文件、.env 和备份。")
+    page_header("🔄 同步与备份", "在设备间同步核心数据，并保留本地备份。")
+    st.info("GitHub 用来同步代码和 data/sync/portfolio_sync.json，不同步截图、SQLite 数据库、备份文件和 .env。")
     status = get_sync_status()
+    backups = sorted((DATABASE_PATH.parent / "backups").glob("*.db"), reverse=True)[:5]
     st.subheader("当前设备状态")
     cards = st.columns(4)
     git_state = "未配置" if status["git_remote"] == "未配置" else "有改动" if status["git_dirty"] else "已同步"
-    for col, label, value in zip(cards, ["当前设备", "本地数据更新时间", "同步文件状态", "Git 状态"],
-        [status["os"], status["local_updated_at"] or "暂无数据", "已导出" if status["sync_exists"] else "未导出", git_state]):
+    data_state = "未导出" if not status["sync_exists"] else "有本地改动" if status["possibly_out_of_sync"] else git_state
+    for col, label, value in zip(cards, ["当前设备", "数据状态", "最近同步时间", "最近备份时间"],
+        [status["os"], data_state, status["sync_exported_at"] or "尚未同步", datetime.fromtimestamp(backups[0].stat().st_mtime).strftime("%Y-%m-%d %H:%M") if backups else "尚未备份"]):
         with col: metric_card(label, value)
     if status["possibly_out_of_sync"]: st.warning("本地数据库比同步快照新，导入可能覆盖本机较新的数据。")
-    st.subheader("三步同步流程")
-    c1, c2 = st.columns(2)
-    c1.markdown("**在这台电脑改完后**\n\n1. 导出同步数据\n2. 提交并推送到 GitHub\n3. 另一台电脑 `git pull` 后导入")
-    c2.markdown("**在另一台电脑拉取后**\n\n1. 预览同步数据\n2. 确认导入\n3. 检查持仓是否正确")
     st.subheader("操作")
     c1, c2, c3 = st.columns(3)
     if c1.button("导出本机数据", type="primary", width="stretch"):
@@ -626,8 +699,13 @@ def sync_page() -> None:
     if st.button("导入同步数据", disabled=not confirmed, type="primary"):
         result = import_sync_snapshot(mode)
         (st.error if result["errors"] else st.success)(f"导入完成：新增 {result['inserted']}，更新 {result['updated']}，跳过 {result['skipped']}。")
-    st.button("🐙 跳转 GitHub 同步", on_click=lambda: st.session_state.update(navigation="GitHub 同步"))
-    backups = sorted((DATABASE_PATH.parent / "backups").glob("*.db"), reverse=True)[:5]
+    c1, c2, c3 = st.columns(3)
+    if c1.button("提交并推送 GitHub", width="stretch"):
+        result = run_git_action("push"); (st.success if result["ok"] else st.error)(result["message"])
+    if c2.button("拉取 GitHub 最新代码", width="stretch"):
+        result = run_git_action("pull"); (st.success if result["ok"] else st.error)(result["message"])
+    if c3.button("手动备份", width="stretch"):
+        st.success(f"备份完成：{backup_database().name}")
     with st.expander("查看备份"): st.write([path.name for path in backups] or "暂无备份")
     with st.expander("高级信息"):
         st.write({"数据库路径": status["database_path"], "同步文件路径": status["sync_path"], "Git remote": status["git_remote"],
@@ -643,7 +721,7 @@ def github_sync_page() -> None:
 
 
 def settings_page() -> None:
-    page_header("🗄️ 数据备份 / 设置", "所有资产数据默认只保存在本地 SQLite；导出文件也不会自动上传。")
+    page_header("⚙️ 设置", "管理本地偏好、OCR 状态和风险参数。")
     show_flash()
     engine = get_local_ocr_engine()
     c1, c2, c3 = st.columns(3)
@@ -662,27 +740,20 @@ def settings_page() -> None:
         path = backup_database(); st.success(f"已备份到：{path}")
     if c2.button("导出 holdings/trades/plans/rules CSV 压缩包", width="stretch"):
         path = export_all_csv_zip(); st.success(f"已导出到：{path}")
-    st.subheader("GitHub 同步说明")
-    st.code('python scripts\\git_sync.py "update dashboard"', language="powershell")
-    st.caption("数据库、截图、备份、导出文件和 .env 已被 .gitignore 排除。脚本不会设置全局代理。")
     st.warning("免责声明：本项目仅用于个人投资记录和辅助决策，不构成投资建议，不保证收益，不自动交易。")
     with st.expander("高级信息"):
         st.write(f"数据库路径：{DATABASE_PATH}")
 
 
 PAGES = {
-    "总览 Dashboard": dashboard_page,
-    "持仓管理": holdings_page,
+    "总览": dashboard_page,
+    "持仓工作台": holdings_page,
     "截图导入": screenshot_import_page,
     "投资日报": daily_report_page,
-    "买卖计划": plans_page,
-    "操作日记": trades_page,
-    "复盘中心": review_page,
-    "资产配置": allocation_page,
     "风险雷达": risk_page,
-    "数据同步": sync_page,
-    "GitHub 同步": github_sync_page,
-    "数据备份/设置": settings_page,
+    "复盘中心": review_page,
+    "同步与备份": sync_page,
+    "设置": settings_page,
 }
 
 with st.sidebar:

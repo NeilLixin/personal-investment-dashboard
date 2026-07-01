@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS holdings (
     asset_type TEXT NOT NULL, market TEXT NOT NULL, current_value REAL DEFAULT 0,
     cost_amount REAL DEFAULT 0, profit_amount REAL DEFAULT 0, profit_rate REAL DEFAULT 0,
     holding_share REAL, latest_price REAL, target_min_ratio REAL DEFAULT 0,
-    target_max_ratio REAL DEFAULT 1, risk_level TEXT DEFAULT '中', note TEXT,
+    target_max_ratio REAL DEFAULT 1, risk_level TEXT DEFAULT '中', daily_profit REAL, note TEXT,
     created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS trades (
@@ -74,10 +74,14 @@ def init_db(db_path: Path = DATABASE_PATH) -> None:
             "result_type": "TEXT DEFAULT '未判断'", "result_amount": "REAL", "result_rate": "REAL",
             "mistake_tags": "TEXT DEFAULT '[]'", "success_tags": "TEXT DEFAULT '[]'", "lesson": "TEXT",
             "confidence_score": "INTEGER", "discipline_score": "INTEGER",
+            "quantity": "REAL", "note": "TEXT",
         }
         for name, definition in migrations.items():
             if name not in columns:
                 conn.execute(f"ALTER TABLE trades ADD COLUMN {name} {definition}")
+        holding_columns = {row[1] for row in conn.execute("PRAGMA table_info(holdings)")}
+        if "daily_profit" not in holding_columns:
+            conn.execute("ALTER TABLE holdings ADD COLUMN daily_profit REAL")
 
 
 def fetch_all(table: str, db_path: Path = DATABASE_PATH, order_by: str = "id DESC") -> list[dict]:

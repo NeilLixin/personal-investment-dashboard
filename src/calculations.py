@@ -42,7 +42,7 @@ def enrich_holdings(records: Iterable[Mapping]) -> pd.DataFrame:
     frame = pd.DataFrame(list(records))
     if frame.empty:
         return frame
-    for column in ("current_value", "cost_amount", "profit_rate", "target_min_ratio", "target_max_ratio"):
+    for column in ("current_value", "cost_amount", "profit_rate", "target_min_ratio", "target_max_ratio", "holding_share", "latest_price", "daily_profit"):
         if column not in frame:
             frame[column] = 0.0
         frame[column] = frame[column].apply(safe_float)
@@ -94,3 +94,24 @@ def format_rate(value: float, signed: bool = False) -> str:
     number = safe_float(value) * 100
     prefix = "+" if signed and number > 0 else ""
     return f"{prefix}{number:.2f}%"
+
+
+def apply_holding_operation(holding: Mapping, action: str, amount: float = 0, quantity: float = 0,
+                            price: float = 0) -> dict:
+    """Calculate the holding changes for a recorded buy/sell without mutating the source row."""
+    result = dict(holding)
+    current, cost = safe_float(result.get("current_value")), safe_float(result.get("cost_amount"))
+    shares, operation_amount, operation_quantity = safe_float(result.get("holding_share")), max(0, safe_float(amount)), max(0, safe_float(quantity))
+    if action in {"买入", "补仓", "定投"}:
+        current += operation_amount; cost += operation_amount; shares += operation_quantity
+    elif action in {"卖出", "减仓"}:
+        sold = min(operation_amount, current); ratio = sold / current if current else 0
+        current -= sold; cost *= 1 - ratio; shares = max(0, shares - operation_quantity)
+    elif action != "观察":
+        raise ValueError(f"不支持的操作类型：{action}")
+    result.update({"current_value": round(max(0, current), 2), "cost_amount": round(max(0, cost), 2),
+                   "holding_share": shares or None})
+    if safe_float(price) > 0: result["latest_price"] = safe_float(price)
+    profit, rate = calculate_profit(result["current_value"], result["cost_amount"])
+    result.update({"profit_amount": profit, "profit_rate": rate})
+    return result

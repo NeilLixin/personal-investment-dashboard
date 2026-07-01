@@ -107,3 +107,11 @@ python scripts\git_sync.py "update dashboard"
 - 两种来源统一经过 `parsed_to_drafts` 和中文确认表，绝不直接写库。
 - 日报用户可见列名中文化；同步技术信息默认折叠；风险雷达为五维本地规则模型。
 - 项目不构成投资建议，不接自动交易。新增截图类型时优先增加独立 parser 和坐标测试。
+
+## v0.5.0 交接补充
+
+- `holdings_page` 是持仓、快速操作、计划、交易、复盘和设置的统一工作台。
+- `apply_holding_operation` 是快速操作纯计算边界；每次操作先写 trades，用户明确选择后才更新 holdings。
+- `import_service` 以平台+代码或平台+规范化名称匹配，批次重复保留最后一条，覆盖不删除历史表。
+- 独立计划、操作、资产配置函数暂保留用于兼容，但已从主导航移除。
+- 当前继续使用 Streamlit；React 重写的取舍见 `docs/DECISIONS.md`。
