@@ -9,7 +9,7 @@ BACKUPS_DIR = DATA_DIR / "backups"
 EXPORTS_DIR = DATA_DIR / "exports"
 SYNC_DIR = DATA_DIR / "sync"
 SYNC_FILE = SYNC_DIR / "portfolio_sync.json"
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.4.0"
 
 ASSET_TYPES = [
     "现金",
@@ -20,8 +20,8 @@ ASSET_TYPES = [
     "债券/固收",
     "其他",
 ]
-MARKETS = ["A股", "美股", "黄金", "现金", "其他"]
-PLATFORMS = ["支付宝", "券商", "招商银行", "浙商银行", "京东金融", "手动", "其他"]
+MARKETS = ["A股", "海外", "美股", "黄金", "现金", "其他"]
+PLATFORMS = ["支付宝", "东方财富", "券商", "招商银行", "浙商银行", "京东金融", "手动", "其他"]
 RISK_LEVELS = ["低", "中", "高"]
 TRADE_ACTIONS = ["买入", "卖出", "定投", "减仓", "补仓", "观察"]
 EMOTIONS = ["冷静", "恐慌", "怕踏空", "冲动", "按计划"]

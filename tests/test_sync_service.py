@@ -3,7 +3,7 @@ import sqlite3
 from pathlib import Path
 
 from src.database import init_db, insert_row
-from src.sync_service import export_sync_snapshot, import_sync_snapshot
+from src.sync_service import export_sync_snapshot, get_sync_status, import_sync_snapshot
 
 
 def test_export_and_preview_do_not_change_database(tmp_path: Path) -> None:
@@ -30,3 +30,9 @@ def test_missing_fields_is_graceful(tmp_path: Path) -> None:
     sync = tmp_path / "bad.json"; sync.write_text("{}", encoding="utf-8")
     result = import_sync_snapshot("preview", tmp_path / "local.db", sync)
     assert result["errors"]
+
+
+def test_sync_status_keeps_ui_and_advanced_information_separate(tmp_path: Path) -> None:
+    status = get_sync_status(tmp_path / "local.db", tmp_path / "sync.json")
+    assert "database_path" in status and "sync_path" in status
+    assert status["sync_exists"] is False

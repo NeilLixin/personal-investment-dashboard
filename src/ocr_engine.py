@@ -66,9 +66,10 @@ class LocalOCREngine:
             if max(image.size) > MAX_IMAGE_SIDE:
                 image.thumbnail((MAX_IMAGE_SIDE, MAX_IMAGE_SIDE), Image.Resampling.LANCZOS)
             raw_result = self.engine(np.asarray(image))
-            text = normalize_ocr_result(raw_result)
-            return _result(True, text=text, details={"source": source, "original_size": original_size,
-                                                     "processed_size": image.size, "line_count": len(text.splitlines())})
+            normalized = normalize_rapidocr_result(raw_result)
+            return _result(True, text=normalized["text"], items=normalized["items"],
+                           details={"source": source, "original_size": original_size,
+                                    "processed_size": image.size, "line_count": len(normalized["items"])})
         except (ValueError, OSError, UnidentifiedImageError) as exc:
             return _result(False, error=f"图片无法读取：{exc}", details={"exception": type(exc).__name__})
         except Exception as exc:
@@ -77,7 +78,7 @@ class LocalOCREngine:
             _rewind(image_input)
 
     def recognize_images(self, uploaded_files: Iterable[Any]) -> dict[str, Any]:
-        results, sections, errors = [], [], []
+        results, sections, errors, all_items = [], [], [], []
         for index, image_input in enumerate(list(uploaded_files or []), start=1):
             name = str(getattr(image_input, "name", f"截图{index}"))
             item = self.recognize_image(image_input)
@@ -85,11 +86,14 @@ class LocalOCREngine:
             results.append(item)
             if item["ok"]:
                 sections.append(f"## {name}\n{item['text'] or '[未识别到文字]'}")
+                for ocr_item in item.get("items", []):
+                    all_items.append({**ocr_item, "source_name": name, "image_index": index - 1})
             else:
                 errors.append(f"{name}: {item['error']}")
         if not results:
-            return _result(False, error="没有可识别的图片", details={"results": [], "success_count": 0, "failure_count": 0})
-        return _result(bool(sections), text="\n\n".join(sections), error="；".join(errors),
+            return _result(False, error="没有可识别的图片", items=[],
+                           details={"results": [], "success_count": 0, "failure_count": 0})
+        return _result(bool(sections), text="\n\n".join(sections), items=all_items, error="；".join(errors),
                        details={"results": results, "success_count": len(sections), "failure_count": len(errors)})
 
     # Backward-compatible adapter for older callers.
@@ -99,8 +103,10 @@ class LocalOCREngine:
         return result["text"], errors
 
 
-def _result(ok: bool, text: str = "", error: str = "", details: Any = None) -> dict[str, Any]:
-    return {"ok": bool(ok), "text": text or "", "error": error or "", "engine": "rapidocr", "details": details or {}}
+def _result(ok: bool, text: str = "", items: list[dict[str, Any]] | None = None,
+            error: str = "", details: Any = None) -> dict[str, Any]:
+    return {"ok": bool(ok), "text": text or "", "items": items or [], "error": error or "",
+            "engine": "rapidocr", "details": details or {}}
 
 
 def _unavailable_message(status: OCRStatus) -> str:
@@ -159,29 +165,74 @@ def _image_from_bytes(raw: bytes) -> Image.Image:
 
 def normalize_ocr_result(result: Any) -> str:
     """Normalize RapidOCR's `(lines, elapsed)` or line-list result into editable text."""
+    return normalize_rapidocr_result(result)["text"]
+
+
+def normalize_rapidocr_result(result: Any) -> dict[str, Any]:
+    """Normalize real RapidOCR line tuples while retaining polygon and derived coordinates."""
     if result is None:
-        return ""
+        return {"text": "", "items": []}
     lines = result[0] if isinstance(result, tuple) and result else result
     if not lines:
-        return ""
+        return {"text": "", "items": []}
     if isinstance(lines, str):
-        return lines.strip()
-    normalized: list[str] = []
+        return {"text": lines.strip(), "items": []}
+    items: list[dict[str, Any]] = []
     for item in lines:
-        text = ""
+        text, score, box = "", 0.0, []
         if isinstance(item, str):
             text = item
         elif isinstance(item, dict):
             text = str(item.get("text") or item.get("txt") or "")
+            score = _safe_score(item.get("score", item.get("confidence", 0.0)))
+            box = item.get("box") or item.get("points") or []
         elif isinstance(item, (list, tuple)):
             # RapidOCR line shape: [box, text, confidence].
             if len(item) >= 2 and isinstance(item[1], str):
+                box = item[0]
                 text = item[1]
+                score = _safe_score(item[2] if len(item) >= 3 else 0.0)
             else:
                 text = next((part for part in item if isinstance(part, str)), "")
         if text.strip():
-            normalized.append(text.strip())
-    return "\n".join(normalized)
+            points = _normalize_box(box)
+            xs = [point[0] for point in points]
+            ys = [point[1] for point in points]
+            min_x = min(xs) if xs else 0.0
+            max_x = max(xs) if xs else 0.0
+            min_y = min(ys) if ys else 0.0
+            max_y = max(ys) if ys else 0.0
+            items.append({"text": text.strip(), "score": score, "box": points,
+                          "center_x": (min_x + max_x) / 2, "center_y": (min_y + max_y) / 2,
+                          "min_x": min_x, "max_x": max_x, "min_y": min_y, "max_y": max_y})
+    return {"text": "\n".join(item["text"] for item in items), "items": items}
+
+
+def _normalize_box(box: Any) -> list[list[float]]:
+    if isinstance(box, np.ndarray):
+        box = box.tolist()
+    if not isinstance(box, (list, tuple)):
+        return []
+    if len(box) == 4 and all(isinstance(value, (int, float)) for value in box):
+        x1, y1, x2, y2 = map(float, box)
+        return [[x1, y1], [x2, y1], [x2, y2], [x1, y2]]
+    points: list[list[float]] = []
+    for point in box:
+        if isinstance(point, np.ndarray):
+            point = point.tolist()
+        if isinstance(point, (list, tuple)) and len(point) >= 2:
+            try:
+                points.append([float(point[0]), float(point[1])])
+            except (TypeError, ValueError):
+                continue
+    return points
+
+
+def _safe_score(value: Any) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def get_ocr_status() -> OCRStatus:

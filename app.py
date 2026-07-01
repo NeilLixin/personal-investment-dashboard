@@ -10,6 +10,8 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from src.alipay_parser import parse_alipay_text
+from src.alipay_fund_parser import parse_alipay_fund_holdings_from_ocr_items
+from src.eastmoney_parser import parse_eastmoney_holdings_from_ocr_items
 from src.calculations import calculate_profit, enrich_holdings, format_currency, format_rate, portfolio_summary, safe_float
 from src.config import (
     APP_VERSION, ASSET_TYPES, DATABASE_PATH, EMOTIONS, MARKETS, PLAN_TYPES, PLATFORMS,
@@ -21,9 +23,16 @@ from src.database import (
 )
 from src.export_service import backup_database, export_all_csv_zip
 from src.import_service import import_holding_drafts, parsed_to_drafts
+from src.image_preprocess import (
+    crop_alipay_fund_area,
+    load_image_from_uploaded_file,
+    preprocess_mobile_screenshot,
+    save_ocr_debug_images,
+    split_alipay_fund_rows,
+)
 from src.ocr_engine import LocalOCREngine
 from src.rule_engine import evaluate_risks, risk_summary, system_suggestions
-from src.report_service import generate_daily_report, save_daily_report
+from src.report_service import generate_daily_report, localize_records, save_daily_report
 from src.review_service import (
     generate_review_insights, get_emotion_stats, get_mistake_tag_stats,
     get_monthly_review_stats, get_review_summary, get_success_tag_stats,
@@ -180,8 +189,8 @@ def holdings_page() -> None:
     if platform_filter: display = display[display["platform"].isin(platform_filter)]
     if type_filter: display = display[display["asset_type"].isin(type_filter)]
     display = display.sort_values("current_value" if sort_key == "市值从高到低" else "profit_amount", ascending=sort_key == "收益从低到高")
-    shown = display[["id", "name", "code", "platform", "asset_type", "current_value", "cost_amount", "profit_amount", "profit_rate", "asset_ratio", "display_status"]].copy()
-    shown.columns = ["ID", "名称", "代码", "平台", "资产类型", "当前市值", "成本", "浮盈亏", "收益率", "资产占比", "状态"]
+    shown = display[["name", "code", "platform", "asset_type", "current_value", "cost_amount", "profit_amount", "profit_rate", "asset_ratio", "display_status"]].copy()
+    shown.columns = ["名称", "代码", "平台", "资产类型", "当前市值", "成本", "浮盈亏", "收益率", "资产占比", "状态"]
     st.dataframe(shown, width="stretch", hide_index=True, column_config={"当前市值": st.column_config.NumberColumn(format="¥%.2f"), "成本": st.column_config.NumberColumn(format="¥%.2f"), "浮盈亏": st.column_config.NumberColumn(format="¥%.2f"), "收益率": st.column_config.NumberColumn(format="%.2%%"), "资产占比": st.column_config.NumberColumn(format="%.2%%")})
     st.subheader("编辑 / 删除")
     choices = {f"#{row['id']} {row['name']}": int(row["id"]) for row in records}
@@ -199,103 +208,120 @@ def holdings_page() -> None:
 
 
 def screenshot_import_page() -> None:
-    page_header("🖼️ 截图导入", "支持支付宝基金、黄金和理财截图；所有解析结果必须人工确认后才入库。")
+    page_header("🖼️ 截图导入", "上传后自动识别并生成待确认表格；确认前不会写入持仓。")
     show_flash()
-    st.info(
-        "无法自动 OCR 时：① 执行 `pip install -r requirements-ocr.txt`；② 安装后重启 Streamlit；"
-        "③ 仍不可用可使用 iPhone/支付宝的文字识别并粘贴到下方文本框；④ OCR 金额必须人工确认后才能导入。"
-    )
+    advanced = st.toggle("高级调试模式", value=False)
     engine = get_local_ocr_engine()
     status = engine.status
-    c1, c2, c3 = st.columns(3)
-    with c1: metric_card("OCR 引擎", status.engine)
-    with c2: metric_card("OCR 状态", "🟢 可用" if status.available else "🔴 初始化失败" if status.state == "initialization_failed" else "🟡 不可用")
-    with c3: metric_card("识别方式", "本机离线识别")
-    if status.available:
-        st.success(f"{status.message}（{status.engine}）")
-    elif status.state == "initialization_failed":
-        st.error(f"{status.message}：{status.error or '未知错误'}")
-    else:
-        st.warning(f"{status.message}。上传后仍可点击 OCR 按钮查看处理建议，或直接手动粘贴文字。")
-    with st.expander("OCR 安装与排查"):
-        st.code("pip install -r requirements-ocr.txt", language="bash")
-        st.caption("安装完成后必须停止并重新启动 Streamlit。基础页面不依赖 OCR，安装失败也可以继续手动粘贴文字。")
-
-    auto_ocr = st.toggle("上传后自动 OCR", value=False, help="默认关闭；大图或多图识别可能需要一些时间。")
-    files = st.file_uploader("上传支付宝持仓截图（可多选）", type=["png", "jpg", "jpeg", "webp"], accept_multiple_files=True)
+    if not status.available:
+        st.error("本地 OCR 未安装，请执行 pip install -r requirements-ocr.txt，安装后重启项目。")
+    enable_preprocess, save_debug = True, False
+    manual_type = "自动判断"
+    if advanced:
+        c1, c2, c3 = st.columns(3)
+        with c1: metric_card("OCR 引擎", status.engine)
+        with c2: metric_card("OCR 状态", "可用" if status.available else "不可用")
+        with c3: metric_card("识别方式", "本机离线")
+        manual_type = st.selectbox("截图类型", ["自动判断", "支付宝基金", "东方财富", "普通 OCR 文本"])
+        enable_preprocess = st.toggle("启用图片预处理", value=True)
+        save_debug = st.toggle("保存 OCR 调试图片", value=False)
+    files = st.file_uploader("上传持仓截图（可多选）", type=["png", "jpg", "jpeg", "webp"], accept_multiple_files=True)
+    prepared_files: list[dict] = []
     if files:
-        st.write(f"**已上传 {len(files)} 张图片**")
-        st.write("文件名：" + "、".join(file.name for file in files))
-        columns = st.columns(min(3, len(files)))
+        st.markdown(f"已上传 {len(files)} 张图片，系统将自动识别。")
         for index, file in enumerate(files):
-            columns[index % len(columns)].image(file.getvalue(), caption=file.name, width="stretch")
-            file.seek(0)
+            try:
+                original = load_image_from_uploaded_file(file)
+                cropped = crop_alipay_fund_area(original) if enable_preprocess else original
+                processed = preprocess_mobile_screenshot(cropped) if enable_preprocess else cropped
+                prepared_files.append({"name": file.name, "original": original, "processed": processed})
+            except Exception as exc:
+                st.error(f"{file.name} 无法读取，请换一张清晰截图。")
+
+    def detect_type(text: str) -> str:
+        compact = text.replace(" ", "")
+        alipay = sum(key in compact for key in ("支付宝", "基金", "我的持有", "金额/昨日收益", "持有收益/率"))
+        eastmoney = sum(key in compact for key in ("东方财富", "普通", "总资产", "证券市值", "持仓盈亏", "场内基金", "现价", "成本"))
+        return "支付宝基金" if alipay >= 2 else "东方财富" if eastmoney >= 2 else "未知"
 
     def run_ocr() -> None:
-        with st.spinner(f"正在使用 {status.engine} 逐张识别，请稍候……"):
-            result = engine.recognize_images(files or [])
-        st.session_state["ocr_results"] = result
-        if result["text"]:
-            st.session_state["ocr_raw_text"] = result["text"]
-        if not result["ok"]:
-            st.error(result["error"] or f"OCR 不可用。请执行 pip install -r requirements-ocr.txt，安装后重启 Streamlit。")
-        elif result["error"]:
-            st.warning("部分图片识别失败，但成功结果已保留：" + result["error"])
+        with st.spinner("正在识别并解析持仓……"):
+            results, parsed, errors, debug = [], [], [], []
+            for prepared in prepared_files:
+                if save_debug:
+                    save_ocr_debug_images([prepared["processed"]], prepared["name"])
+                result = engine.recognize_image(prepared["processed"]); result["name"] = prepared["name"]; results.append(result)
+                if not result["ok"]:
+                    errors.append(prepared["name"]); continue
+                screenshot_type = manual_type if manual_type != "自动判断" else detect_type(result.get("text", ""))
+                size = result.get("details", {}).get("processed_size") or prepared["processed"].size
+                if screenshot_type == "支付宝基金":
+                    parsed_result = parse_alipay_fund_holdings_from_ocr_items(result.get("items"), size[0], size[1])
+                elif screenshot_type == "东方财富":
+                    parsed_result = parse_eastmoney_holdings_from_ocr_items(result.get("items"), size[0], size[1])
+                else:
+                    parsed_result = {"ok": False, "holdings": [], "debug": {"reason": "无法自动判断截图类型"}, "error": "无法判断截图类型"}
+                parsed.extend(parsed_result["holdings"]); debug.append({"文件": prepared["name"], "类型": screenshot_type, **parsed_result})
+            unique = {(x.get("platform"), x.get("name"), x.get("current_value")): x for x in parsed}
+            st.session_state["ocr_results"] = {"results": results, "errors": errors, "debug": debug}
+            st.session_state["ocr_drafts"] = parsed_to_drafts(unique.values())
+            st.session_state["ocr_parse_failed"] = not bool(unique)
+        if parsed:
+            st.success(f"识别完成，共解析出 {len(unique)} 条持仓，请确认后导入。")
+        elif results and any(item.get("ok") for item in results):
+            st.warning("已识别到文字，但没有解析出完整持仓。请打开高级调试模式查看原因。")
         else:
-            st.success(f"OCR 完成：成功识别 {result['details']['success_count']} 张图片。")
+            st.error("截图识别失败，请确认图片清晰后重新识别。")
 
     signature = tuple((file.name, getattr(file, "size", len(file.getvalue()))) for file in (files or []))
-    should_auto_run = bool(files and auto_ocr and st.session_state.get("ocr_auto_signature") != signature)
-    if should_auto_run:
-        st.session_state["ocr_auto_signature"] = signature
+    if prepared_files and status.available and st.session_state.get("ocr_auto_signature") != (signature, manual_type, enable_preprocess):
+        st.session_state["ocr_auto_signature"] = (signature, manual_type, enable_preprocess)
         run_ocr()
-    if st.button("开始本地 OCR", disabled=not bool(files), type="primary", help="上传图片后可点击；依赖缺失时会显示安装方法。"):
+    c1, c2 = st.columns(2)
+    if c1.button("重新识别", disabled=not prepared_files, width="stretch"):
         run_ocr()
-
-    ocr_result = st.session_state.get("ocr_results")
-    if ocr_result and ocr_result.get("details", {}).get("results"):
-        st.subheader("逐张 OCR 结果")
-        for index, item in enumerate(ocr_result["details"]["results"]):
-            icon = "✅" if item["ok"] else "❌"
-            with st.expander(f"{icon} {item['name']}", expanded=not item["ok"]):
-                if item["ok"]:
-                    st.text(item["text"] or "未识别到文字")
-                else:
-                    st.error(item["error"])
-
-    st.session_state.setdefault("ocr_raw_text", "")
-    raw_text = st.text_area("OCR 原文 / 手动粘贴 OCR 文本", key="ocr_raw_text", height=260,
-                            help="OCR 结果会自动填入；可以直接修正错字，也可以完全手动粘贴文字。")
-    if st.button("解析持仓", type="primary", disabled=not raw_text.strip()):
-        parsed = parse_alipay_text(raw_text)
-        st.session_state["ocr_drafts"] = parsed_to_drafts(parsed)
-        batch_id = insert_row("ocr_import_batches", {"source_platform": "支付宝", "image_count": len(files or []),
-                                                       "raw_text": raw_text, "parsed_json": json.dumps(parsed, ensure_ascii=False),
-                                                       "status": "pending"})
-        st.session_state["ocr_batch_id"] = batch_id
-        if not parsed:
-            st.warning("没有解析出完整持仓。请检查产品名称和持有金额，或手动整理文本后重试。")
+    if c2.button("清空本次结果", width="stretch"):
+        for key in ("ocr_results", "ocr_drafts", "ocr_auto_signature", "ocr_parse_failed"):
+            st.session_state.pop(key, None)
+        st.rerun()
+    ocr_result = st.session_state.get("ocr_results", {})
+    if advanced and ocr_result:
+        with st.expander("OCR 与解析调试信息", expanded=True):
+            for prepared in prepared_files: st.image(prepared["processed"], caption=f"预处理图 · {prepared['name']}")
+            for result in ocr_result.get("results", []):
+                st.text_area(f"OCR 原文 · {result.get('name')}", result.get("text", ""), disabled=True)
+                st.dataframe(pd.DataFrame(result.get("items", [])), hide_index=True, width="stretch")
+            st.json(ocr_result.get("debug", []))
+        manual_text = st.text_area("手动粘贴 OCR 文本（fallback）")
+        if manual_text and st.button("按普通文本解析"):
+            st.session_state["ocr_drafts"] = parsed_to_drafts(parse_alipay_text(manual_text))
     drafts = st.session_state.get("ocr_drafts")
     if isinstance(drafts, pd.DataFrame) and not drafts.empty:
-        st.subheader("确认导入")
-        st.caption("请核对并修改字段；同名或同代码持仓可选择覆盖、新增或跳过。")
+        st.subheader("待确认导入表格")
+        display = drafts.rename(columns={"name":"名称", "code":"代码", "platform":"平台", "asset_type":"资产类型", "market":"市场",
+            "current_value":"当前市值", "cost_amount":"成本金额", "profit_amount":"浮盈亏", "profit_rate":"收益率",
+            "yesterday_profit":"昨日/今日收益", "holding_share":"份额", "latest_price":"最新价", "risk_level":"风险等级",
+            "note":"备注", "duplicate_action":"导入策略"})
+        display.insert(0, "选择", True)
+        visible = ["选择", "名称", "代码", "平台", "资产类型", "市场", "当前市值", "成本金额", "浮盈亏", "收益率", "昨日/今日收益", "份额", "最新价", "风险等级", "备注", "导入策略"]
         edited = st.data_editor(
-            drafts, width="stretch", num_rows="dynamic", key="ocr_editor",
+            display[visible], width="stretch", num_rows="dynamic", key="ocr_editor",
             column_config={
-                "platform": st.column_config.SelectboxColumn(options=PLATFORMS),
-                "asset_type": st.column_config.SelectboxColumn(options=ASSET_TYPES),
-                "market": st.column_config.SelectboxColumn(options=MARKETS),
-                "risk_level": st.column_config.SelectboxColumn(options=RISK_LEVELS),
-                "duplicate_action": st.column_config.SelectboxColumn("重复项处理", options=["覆盖更新", "新增一条", "跳过"]),
+                "平台": st.column_config.SelectboxColumn(options=PLATFORMS), "资产类型": st.column_config.SelectboxColumn(options=ASSET_TYPES),
+                "市场": st.column_config.SelectboxColumn(options=MARKETS), "风险等级": st.column_config.SelectboxColumn(options=RISK_LEVELS),
+                "导入策略": st.column_config.SelectboxColumn(options=["覆盖更新", "新增一条", "跳过"]),
+                "当前市值": st.column_config.NumberColumn(format="¥%.2f"), "成本金额": st.column_config.NumberColumn(format="¥%.2f"),
+                "浮盈亏": st.column_config.NumberColumn(format="%+.2f"), "收益率": st.column_config.NumberColumn(format="%+.2%%"),
             },
         )
-        if st.button("确认导入持仓", type="primary"):
-            result = import_holding_drafts(edited.fillna("").to_dict("records"))
-            batch_id = st.session_state.get("ocr_batch_id")
-            if batch_id:
-                update_row("ocr_import_batches", batch_id, {"parsed_json": edited.to_json(orient="records", force_ascii=False), "status": "imported"})
+        if st.button("确认导入选中持仓", type="primary"):
+            reverse = {"名称":"name", "代码":"code", "平台":"platform", "资产类型":"asset_type", "市场":"market", "当前市值":"current_value",
+                       "成本金额":"cost_amount", "浮盈亏":"profit_amount", "收益率":"profit_rate", "昨日/今日收益":"yesterday_profit",
+                       "份额":"holding_share", "最新价":"latest_price", "风险等级":"risk_level", "备注":"note", "导入策略":"duplicate_action"}
+            selected = edited[edited["选择"]].drop(columns=["选择"]).rename(columns=reverse)
+            result = import_holding_drafts(selected.fillna("").to_dict("records"))
             st.session_state.pop("ocr_drafts", None)
-            rerun_with_message(f"截图导入完成：新增 {result['inserted']}，更新 {result['updated']}，跳过 {result['skipped']}。")
+            rerun_with_message(f"导入完成：新增 {result['inserted']}，更新 {result['updated']}，跳过 {result['skipped']}，失败 0。")
 
 
 def plans_page() -> None:
@@ -454,7 +480,7 @@ def review_page() -> None:
         st.subheader("历史复盘")
         search = st.text_input("搜索历史复盘")
         if search: reviewed = reviewed[reviewed.astype(str).apply(lambda row: row.str.contains(search, case=False).any(), axis=1)]
-        st.dataframe(reviewed, width="stretch", hide_index=True)
+        st.dataframe(pd.DataFrame(localize_records(reviewed.to_dict("records"))), width="stretch", hide_index=True)
 
 
 def allocation_page() -> None:
@@ -493,7 +519,8 @@ def risk_page() -> None:
                 "tech_red_ratio": .35, "high_risk_asset_red_ratio": .50, "weekly_trade_warning": 8, "impulse_warning_ratio": .30}
     settings = get_setting("risk_thresholds", defaults)
     settings["enabled_plan_count"] = sum(p.get("enabled", 1) for p in fetch_all("plans"))
-    risks = evaluate_risks(records, trades, settings)
+    plans = fetch_all("plans")
+    risks = evaluate_risks(records, trades, settings, plans, get_sync_status())
     status = risk_summary(risks)
     c1, c2, c3, c4, c5 = st.columns(5)
     with c1: metric_card("总风险分", str(status["risk_score"]))
@@ -501,17 +528,31 @@ def risk_page() -> None:
     with c3: metric_card("🔴 风险", str(status["red_count"]))
     with c4: metric_card("🟡 注意", str(status["yellow_count"]))
     with c5: metric_card("🟢 正常", str(status["green_count"]))
-    risk_cards(risks)
+    dimensions = status["dimensions"]
+    radar = go.Figure(go.Scatterpolar(r=list(dimensions.values()), theta=list(dimensions), fill="toself", name="风险分"))
+    radar.update_layout(polar={"radialaxis": {"visible": True, "range": [0, 35]}}, showlegend=False, title="五维风险评分")
+    st.plotly_chart(radar, width="stretch", config=PLOTLY_CONFIG)
+    st.subheader("最重要的三条风险")
+    risk_cards([item for item in risks if item["level"] != "green"][:3] or risks[:1])
+    st.subheader("建议优先动作")
+    for item in [item for item in risks if item["level"] != "green"][:3]: st.write(f"- {item['suggestion']}")
+    with st.expander("查看全部风险项"):
+        risk_cards(risks)
     if not frame.empty:
         c1, c2 = st.columns(2)
         concentration = frame.groupby("asset_type", as_index=False)["current_value"].sum()
         c1.plotly_chart(px.pie(concentration, names="asset_type", values="current_value", hole=.45, title="资产集中度"), width="stretch", config=PLOTLY_CONFIG)
         high = frame.groupby("risk_level", as_index=False)["current_value"].sum()
         c2.plotly_chart(px.bar(high, x="risk_level", y="current_value", color="risk_level", title="高风险资产占比"), width="stretch", config=PLOTLY_CONFIG)
+        c1, c2 = st.columns(2)
+        c1.plotly_chart(px.bar(frame.sort_values("asset_ratio", ascending=False), x="name", y="asset_ratio", title="单一持仓占比排行"), width="stretch", config=PLOTLY_CONFIG)
+        c2.plotly_chart(px.bar(frame.sort_values("profit_amount"), x="name", y="profit_amount", title="浮盈亏排行"), width="stretch", config=PLOTLY_CONFIG)
     if trades:
         tf = pd.DataFrame(trades); tf["trade_date"] = pd.to_datetime(tf["trade_date"], errors="coerce")
         freq = tf.set_index("trade_date").resample("D").size().reset_index(name="次数")
         st.plotly_chart(px.line(freq, x="trade_date", y="次数", title="操作频率"), width="stretch", config=PLOTLY_CONFIG)
+    else:
+        st.info("暂无操作日记，暂时无法分析操作频率。")
     with st.expander("风险规则配置"):
         with st.form("risk_settings"):
             c1, c2, c3 = st.columns(3)
@@ -542,11 +583,11 @@ def daily_report_page() -> None:
     if report["allocations"]:
         allocation = pd.DataFrame(report["allocations"])
         st.plotly_chart(px.pie(allocation, names="asset_type", values="amount", hole=.5, title="资产配置"), width="stretch", config=PLOTLY_CONFIG)
-        st.dataframe(allocation, width="stretch", hide_index=True)
+        st.dataframe(pd.DataFrame(localize_records(report["allocations"])), width="stretch", hide_index=True)
     st.subheader("风险列表"); risk_cards(report["risks"])
     st.subheader("启用计划")
     if report["plans"]:
-        st.dataframe(pd.DataFrame(report["plans"]), width="stretch", hide_index=True)
+        st.dataframe(pd.DataFrame(localize_records(report["plans"], ["asset_name", "plan_type", "trigger_condition", "trigger_value", "suggested_action", "priority", "note"])), width="stretch", hide_index=True)
     else:
         st.info("暂无启用计划。")
     st.subheader("复制版 Markdown")
@@ -557,31 +598,42 @@ def daily_report_page() -> None:
 
 
 def sync_page() -> None:
-    page_header("🔄 数据同步", "用可审查的 JSON 快照在 Mac 与 Windows 之间同步核心数据。")
-    st.warning("结构化持仓数据会写入 data/sync/portfolio_sync.json 并提交到私有 GitHub。不会同步截图、.env、token、SQLite、备份和导出文件。私有仓库也不是绝对安全，切勿设为 public。")
+    page_header("🔄 数据同步", "在 Mac 与 Windows 之间同步持仓、计划、日记和设置。")
+    st.info("同步文件只包含持仓、计划、日记和设置，不包含截图、数据库文件、.env 和备份。")
     status = get_sync_status()
+    st.subheader("当前设备状态")
     cards = st.columns(4)
-    for col, label, value in zip(cards, ["当前设备 / 系统", "同步文件", "同步来源", "Git 状态"],
-        [f"{status['device']} / {status['os']}", "已存在" if status['sync_exists'] else "不存在", status['sync_source'] or "尚未导出", f"{status['git_branch']} · {'有改动' if status['git_dirty'] else '干净'}"]):
+    git_state = "未配置" if status["git_remote"] == "未配置" else "有改动" if status["git_dirty"] else "已同步"
+    for col, label, value in zip(cards, ["当前设备", "本地数据更新时间", "同步文件状态", "Git 状态"],
+        [status["os"], status["local_updated_at"] or "暂无数据", "已导出" if status["sync_exists"] else "未导出", git_state]):
         with col: metric_card(label, value)
-    st.write(f"数据库：`{status['database_path']}`  ·  同步文件：`{status['sync_path']}`")
-    st.write(f"本地更新时间：{status['local_updated_at'] or '无'}  ·  快照导出时间：{status['sync_exported_at'] or '无'}  ·  remote：{status['git_remote']}")
     if status["possibly_out_of_sync"]: st.warning("本地数据库比同步快照新，导入可能覆盖本机较新的数据。")
+    st.subheader("三步同步流程")
     c1, c2 = st.columns(2)
-    if c1.button("导出本机数据到同步文件", type="primary", width="stretch"):
-        result = export_sync_snapshot(); st.success(f"导出完成：{result['counts']} → {result['file_path']}")
-    if c2.button("预览同步文件", width="stretch"):
+    c1.markdown("**在这台电脑改完后**\n\n1. 导出同步数据\n2. 提交并推送到 GitHub\n3. 另一台电脑 `git pull` 后导入")
+    c2.markdown("**在另一台电脑拉取后**\n\n1. 预览同步数据\n2. 确认导入\n3. 检查持仓是否正确")
+    st.subheader("操作")
+    c1, c2, c3 = st.columns(3)
+    if c1.button("导出本机数据", type="primary", width="stretch"):
+        result = export_sync_snapshot(); st.success(f"导出完成，共 {sum(result['counts'].values())} 条记录。")
+    if c2.button("预览同步数据", width="stretch"):
         st.session_state["sync_preview"] = import_sync_snapshot("preview")
     if st.session_state.get("sync_preview"):
-        st.json(st.session_state["sync_preview"])
+        preview = st.session_state["sync_preview"]
+        st.write(f"同步文件包含 {sum(preview['counts'].values())} 条记录。" if not preview["errors"] else "同步文件存在问题，请查看高级信息。")
     mode = st.radio("导入模式", ["merge", "overwrite"], format_func=lambda x: "合并（同 ID 更新）" if x == "merge" else "覆盖（清空核心表后导入）", horizontal=True)
     confirmed = st.checkbox("我已确认导入；覆盖模式将替换本地核心数据")
-    if st.button("从同步文件导入到本机", disabled=not confirmed, type="primary"):
-        result = import_sync_snapshot(mode); st.json(result)
-        (st.error if result["errors"] else st.success)("导入完成，请查看统计与错误列表。")
+    if st.button("导入同步数据", disabled=not confirmed, type="primary"):
+        result = import_sync_snapshot(mode)
+        (st.error if result["errors"] else st.success)(f"导入完成：新增 {result['inserted']}，更新 {result['updated']}，跳过 {result['skipped']}。")
+    st.button("🐙 跳转 GitHub 同步", on_click=lambda: st.session_state.update(navigation="GitHub 同步"))
     backups = sorted((DATABASE_PATH.parent / "backups").glob("*.db"), reverse=True)[:5]
-    with st.expander("最近备份"): st.write([str(path) for path in backups] or "暂无备份")
-    st.info("一键流程：公司 Mac 导出 → GitHub 同步页提交推送；家里 Windows git pull → 本页预览 → 确认导入。")
+    with st.expander("查看备份"): st.write([path.name for path in backups] or "暂无备份")
+    with st.expander("高级信息"):
+        st.write({"数据库路径": status["database_path"], "同步文件路径": status["sync_path"], "Git remote": status["git_remote"],
+                  "分支": status["git_branch"], "hostname": status["device"], "exported_at": status["sync_exported_at"],
+                  "备份路径": [str(path) for path in backups]})
+        if st.session_state.get("sync_preview"): st.json(st.session_state["sync_preview"])
 
 
 def github_sync_page() -> None:
@@ -596,7 +648,7 @@ def settings_page() -> None:
     engine = get_local_ocr_engine()
     c1, c2, c3 = st.columns(3)
     with c1: metric_card("当前版本", APP_VERSION)
-    with c2: metric_card("数据库", str(DATABASE_PATH))
+    with c2: metric_card("数据存储", "本机本地")
     with c3: metric_card("OCR 状态", "🟢 可用" if engine.status.available else "🟡 未安装")
     st.subheader("数据操作")
     c1, c2 = st.columns(2)
@@ -614,6 +666,8 @@ def settings_page() -> None:
     st.code('python scripts\\git_sync.py "update dashboard"', language="powershell")
     st.caption("数据库、截图、备份、导出文件和 .env 已被 .gitignore 排除。脚本不会设置全局代理。")
     st.warning("免责声明：本项目仅用于个人投资记录和辅助决策，不构成投资建议，不保证收益，不自动交易。")
+    with st.expander("高级信息"):
+        st.write(f"数据库路径：{DATABASE_PATH}")
 
 
 PAGES = {
