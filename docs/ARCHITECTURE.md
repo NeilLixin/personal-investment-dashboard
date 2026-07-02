@@ -11,6 +11,8 @@ Streamlit UI (app.py)
 
 Python 业务逻辑不堆在页面：数据库、计算、规则、OCR、支付宝解析、导入和导出分别位于独立模块。
 
+本地运行环境和 Mac → Mac mini 重建说明见 `docs/MAC_MINI_SETUP.md`。
+
 ## 数据流
 
 ```text

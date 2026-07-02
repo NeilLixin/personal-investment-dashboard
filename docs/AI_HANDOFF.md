@@ -178,4 +178,18 @@ python -m pytest
 - 当前不使用 React 重写，优先简化日常流程。
 - 前台隐藏技术细节，代码保持模块化，文档随行为变更。
 
+## Mac mini 迁移
+
+如果需要把当前项目从 Mac 迁移到 Mac mini，先阅读 `docs/MAC_MINI_SETUP.md`。
+
+原则：
+
+- 不复制旧机器虚拟环境。
+- 在 Mac mini 上重新安装 Python 3.11。
+- 重新创建项目虚拟环境。
+- 通过 requirements 文件重新安装依赖。
+- OCR、AKShare 等可选能力按需安装。
+- 本地数据库、上传文件、导出文件、token、真实截图等敏感数据不要提交到仓库。
+- 迁移后运行 `python -m pytest`，并验证关键页面和核心功能。
+
 接手顺序：先读本文件与 `PROJECT_STATE.md`，查看 `git status` 并保留用户未提交改动；运行测试后再修改。代码与文档冲突时，以当前代码和测试为准，并同步修正文档。
