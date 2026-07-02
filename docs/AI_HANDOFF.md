@@ -1,117 +1,171 @@
-# AI Handoff — personal-investment-dashboard
+# personal-investment-dashboard 项目交接文档
 
-新 ChatGPT / Codex 会话应先阅读本文件，再阅读 `PROJECT_STATE.md`、`ARCHITECTURE.md`、`TASKS.md`、`DECISIONS.md`、`CHANGELOG.md`、`CHATGPT_CONTEXT.md` 和根目录 README。
+## 1. 项目定位
 
-## 项目定位
+这是一个本地运行的个人投资辅助系统，中文名为“投资驾驶舱”。核心用途是管理持仓、通过截图辅助录入、记录交易与计划、完成复盘、生成投资日报、提示仓位与行为风险，并在 Mac 和 Windows 之间同步结构化数据。
 
-这是本地“一人投资驾驶舱”：管理持仓、观察资产配置、约束仓位风险、记录买卖计划与操作复盘。它不是投资建议系统、自动赚钱机器或自动交易程序；不连接券商、不自动买卖、不抓行情、不调用 OpenAI API。
+它不是自动交易软件：不接券商下单接口，不自动买卖，不预测涨跌，不保证收益，也不构成投资建议。
 
-## v0.3.0 已完成
+## 2. 技术栈
 
-- Streamlit 九页中文界面：总览、持仓、截图导入、计划、日记、复盘、配置、风险和设置。
-- SQLite 自动初始化及 holdings、trades、plans、rules、ocr_import_batches、app_settings 表。
-- 结构化 JSON 跨设备同步、投资日报、风险评分与复盘统计；旧 trades 表启动时自动迁移。
-- 持仓收益、收益率、资产占比和目标区间计算。
-- Plotly 资产配置、平台分布、盈亏和集中度图表。
-- 本地规则风险雷达。
-- RapidOCR 可选集成、OCR boxes 坐标保留和手动 OCR 文本兜底。
-- 支付宝基金持仓专用三列解析器、图片预处理、按行切分和失败诊断。
-- OCR 结果人工编辑确认及覆盖/新增/跳过策略。
-- CSV、SQLite 备份、demo 数据、GitHub 同步脚本与 pytest 测试。
+- Python 3.11、Streamlit、SQLite
+- Pandas、Plotly、Pillow
+- RapidOCR / `rapidocr-onnxruntime`（可选依赖）
+- pytest
 
-## 目录结构
+当前没有使用 Vue、React、原生 JavaScript 或 FastAPI。现阶段继续用 Streamlit 做产品化与稳定性优化；等功能、数据模型和使用流程稳定后，再评估 React/Vue + FastAPI。
 
-```text
-app.py
-src/                 业务、数据库、计算、OCR、解析和 UI 组件
-scripts/             demo、备份和 Git 同步
-tests/               计算、支付宝解析和规则测试
-data/                本地数据库/上传/备份/导出（运行时创建，敏感内容不提交）
-docs/                项目维护文档
-requirements.txt
-requirements-ocr.txt OCR 可选依赖
+## 3. 运行路径
+
+Mac：
+
+```bash
+cd /Users/lixin/personal-investment-dashboard
+source /Users/lixin/.venvs/personal-investment-dashboard/bin/activate
+python scripts/start.py
 ```
 
-## 关键路径
-
-- 项目：`D:\AAA-Projects\personal-investment-dashboard`
-- Windows 虚拟环境：`D:\AAA-Projects\.venvs\personal-investment-dashboard`
-- 数据库：`data/investment_dashboard.db`
-- Streamlit 入口：`app.py`
-
-## 启动
+Windows：
 
 ```powershell
 cd D:\AAA-Projects\personal-investment-dashboard
 D:\AAA-Projects\.venvs\personal-investment-dashboard\Scripts\Activate.ps1
-streamlit run app.py
+python scripts\start.py
 ```
 
-## OCR 方案
+不要修改另一个旧项目：`/Users/lixin/trend-content-factory` 或 `D:\AAA-Projects\trend-content-factory`。
 
-`src/ocr_engine.py` 可选加载 `rapidocr-onnxruntime`，Streamlit 进程内只初始化一次。依赖缺失或初始化失败不能阻止应用启动。截图导入始终提供手动文本兜底；OCR 原文会保留在批次记录，解析草稿必须人工确认后才进入 holdings。安装：`pip install -r requirements-ocr.txt`。
+## 4. 数据和隐私
 
-支付宝专用链路由 image_preprocess、ocr_engine 和 alipay_fund_parser 组成：先裁剪增强并可选按行切分，
-再保留 OCR boxes，最后按名称、金额/昨日收益、持有收益/率三列和 y 坐标分组。失败时回退旧文本解析。
+本地数据库是 `data/investment_dashboard.db`。
 
-安装后必须重启 Streamlit。页面支持多图逐张识别、自动 OCR 开关、逐图结果与错误；按钮只在没有上传文件时禁用，OCR 依赖缺失时点击按钮会显示安装方式。UploadedFile 读取后会复位到开头，单张坏图不会中断其他图片。
+禁止提交：SQLite 数据库及旁路文件、`data/uploads/`、`data/backups/`、`data/exports/`、`.env`、token、日志、真实截图、账户信息和真实资产导出文件。
 
-## GitHub 同步
+允许提交：`data/sync/portfolio_sync.json`。它用于私有 GitHub 仓库中的跨设备结构化数据同步，可能包含真实持仓数据。私有仓库不等于绝对安全，禁止把仓库设为 public。
 
-`data/sync/portfolio_sync.json` 是唯一允许提交的运行时数据快照，包含核心投资数据。数据库、uploads、backups、exports、截图、`.env` 与 token 仍禁止提交。私有仓库不得改为 public。
+文档、测试和 demo 数据中不得出现用户的具体持仓名称、真实金额或真实截图内容。
 
-首次上传按 README 执行 `git init` 和 remote 配置。后续使用：
+## 5. 当前主要模块
+
+- `app.py`：Streamlit 入口、八个主导航和页面编排
+- `src/database.py`：SQLite 初始化、查询和兼容迁移
+- `src/calculations.py`：收益、占比和配置状态计算
+- `src/ocr_engine.py`、`src/image_preprocess.py`：本地 OCR、坐标结果归一化和图片预处理
+- `src/alipay_fund_parser.py`、`src/eastmoney_parser.py`：不同截图来源的坐标解析
+- `src/alipay_parser.py`：普通 OCR 文本回退解析
+- `src/import_service.py`：确认导入、批次去重和覆盖更新
+- `src/rule_engine.py`：五维风险评分和规则建议
+- `src/report_service.py`：投资日报和 Markdown
+- `src/review_service.py`：复盘统计与洞察
+- `src/sync_service.py`、`src/git_service.py`：结构化同步、备份和 Git 状态
+- `src/ui_components.py`：通用 UI、中文列名与格式化组件
+
+实际代码优先于文档；新增职责应继续拆到 `src/`，不要把业务逻辑堆回页面函数。
+
+## 6. 当前产品方向
+
+v0.5.0 已完成产品化收口，主导航为：总览、持仓工作台、截图导入、投资日报、风险雷达、复盘中心、同步与备份、设置。
+
+计划、交易记录和持仓设置已经并入持仓工作台；资产配置融入总览与风险判断；数据同步、GitHub 操作和备份已经合并。下一阶段重点是稳定真实使用流程、减少技术感、改善空状态与错误提示，而不是继续增加页面。
+
+## 7. 持仓工作台
+
+持仓工作台是日常操作中心，负责持仓筛选、详情、快速操作、买卖计划、交易记录、复盘和持仓设置。
+
+快速操作默认“仅记录操作”；只有用户明确选择“记录并更新持仓”时，才修改市值、成本或份额。每次操作先写交易记录，历史计划、交易和复盘不得因持仓覆盖导入而被删除。
+
+## 8. 截图导入
+
+默认流程是：上传截图 → 自动 OCR → 自动判断来源 → 自动解析 → 中文确认表 → 用户确认后入库。
+
+当前支持支付宝基金持仓、东方财富持仓和普通 OCR 文本回退。OCR 原文、坐标项、预处理图、诊断 JSON 和路径默认隐藏，只在高级调试模式显示。OCR 结果永远不能直接写入持仓，金额和名称必须人工确认。
+
+## 9. 重复持仓规则
+
+截图导入默认覆盖同平台已有持仓，而不是新增重复行：
+
+- code 非空：`platform + code`
+- code 为空：`platform + normalized_name`
+
+规范化名称会清理空白、换行、括号差异和无关标签。同一批次重复时保留最后一次结果。覆盖只更新持仓核心字段，不删除历史交易、计划或复盘。
+
+## 10. 风险雷达
+
+风险雷达不预测市场，只根据本地数据评估五个维度：仓位风险、收益风险、交易行为风险、复盘纪律风险、数据质量风险。
+
+输出包括 0–100 总风险分、正常/注意/危险等级、重要风险项、具体依据和行动建议。建议必须说明触发依据，不能只显示笼统的“危险”。
+
+## 11. 投资日报
+
+日报默认展示今日总览、配置摘要、风险提示、今日建议、待复盘事项和计划提醒。用户界面的表格列名必须中文化，不直接暴露数据库字段。
+
+Markdown 保留在“导出 / 复制日报”折叠区域，可用于备忘录、Obsidian、Notion 或外部复盘；仅在本工具查看时可忽略。
+
+## 12. 同步与备份
+
+“同步与备份”统一承载结构化数据导出/导入、Git 拉取/推送、数据库备份和备份查看。默认只显示设备、数据状态、最近同步与备份时间及常用操作。
+
+数据库路径、同步文件路径、remote、分支、hostname、JSON 数量和 Git 原始状态放在高级信息中。导入前必须备份；覆盖模式必须明确确认。
+
+## 13. UI 方向
+
+继续用 Streamlit 的 CSS、卡片、tabs、expander、`st.data_editor` 和 `column_config` 提升产品感。金额、收益率、风险颜色和中文列名应保持一致。
+
+普通界面默认隐藏 id、时间戳、raw text、parsed JSON、schema version、数据库路径和 debug 信息，并提供友好的空状态与可执行错误提示。
+
+## 14. OCR 安装
+
+Mac：
+
+```bash
+cd /Users/lixin/personal-investment-dashboard
+source /Users/lixin/.venvs/personal-investment-dashboard/bin/activate
+python -m pip install -r requirements-ocr.txt
+python -c "from rapidocr_onnxruntime import RapidOCR; print('RapidOCR OK')"
+```
+
+Windows：
 
 ```powershell
-python scripts\git_sync.py "update dashboard"
+cd D:\AAA-Projects\personal-investment-dashboard
+D:\AAA-Projects\.venvs\personal-investment-dashboard\Scripts\Activate.ps1
+python -m pip install -r requirements-ocr.txt
+python -c "from rapidocr_onnxruntime import RapidOCR; print('RapidOCR OK')"
 ```
 
-脚本不得设置全局代理；只允许用户显式配置 repository-local proxy。
+安装后必须重启 Streamlit。OCR 缺失或初始化失败时页面仍应可用，并保留手动粘贴文本的兜底。如果安装遇到 SOCKS 代理错误，检查或临时清理代理环境变量，禁止把代理凭据写入仓库。
 
-## 禁止提交
+## 15. GitHub 注意事项
 
-- `data/*.db`、`data/uploads/`、`data/backups/`、`data/exports/`
-- `.env`、截图原图、真实资产数据、账户信息、Token/API Key/Cookie
-- 虚拟环境、缓存和日志
+仓库是私有仓库。push 出现 403 时，检查 fine-grained token 是否选择本仓库，并具有 Contents Read and write、Metadata Read-only 权限。禁止把 token 写入代码、文档、命令脚本或提交记录。
 
-## 重要边界
+## 16. 下一步优先任务
 
-- 不增加自动交易、券商下单或自动发布交易指令。
-- 不增加 OpenAI API 或付费外部 API。
-- 第一版不联网抓行情；数据手动录入或截图导入。
-- OCR 必须可选，解析结果必须人工确认。
-- 风险规则只做提示，不给确定性收益承诺。
+产品化导航与页面合并已在 v0.5.0 完成。接下来优先：
 
-## 下一步 TODO
+1. 用脱敏样本补齐支付宝和东方财富页面变体测试。
+2. 提升截图来源识别、坐标解析和错误诊断的稳定性。
+3. 真实使用后校准五维风险阈值和复盘洞察。
+4. 继续简化持仓工作台与同步页，隐藏非必要技术信息。
+5. 增加关键 Streamlit 流程 smoke test 和数据库迁移测试。
+6. 评估手动价格快照历史；不要直接接行情或自动交易。
 
-1. 用更多脱敏支付宝截图扩展三列 parser 测试样本和页面变体。
-2. 增加更细的 CSV 字段校验和导入错误报告。
-3. 真实使用后调整风险阈值和复盘统计。
-4. 评估是否增加手动价格快照历史；不要直接跳到行情 API。
-5. 增加脱敏 UI 截图和基本 Streamlit smoke test。
+## 17. 测试
 
-## 已知问题
+每次改动后运行：
 
-- 支付宝 UI 或列布局变化后坐标 parser 可能需要调整，金额必须人工确认。
-- RapidOCR 首次初始化可能较慢，中文识别质量受截图清晰度影响。
-- Streamlit 为单机个人工具，没有登录和多用户隔离。
-- 风险阈值是通用规则，不代表适合每个人。
+```bash
+python -m pytest
+```
 
-## 接手说明
+重点覆盖支付宝/东方财富解析、重复覆盖、快速操作、风险评分、日报中文化、同步导入导出、OCR 不可用降级、数据库迁移和空数据库。
 
-先运行 `pytest`，再启动 Streamlit。修改数据库前保持向后兼容；修改 OCR parser 时必须增加模拟文本测试。不要把真实数据库或截图加入 Git。若代码与文档冲突，以代码和 `PROJECT_STATE.md` 为准，并同步更新本文件。
-# v0.4.0 交接补充
+## 18. 重要原则
 
-- 截图页默认自动 OCR 和自动解析，无法判断类型时在高级模式手动选择。
-- 支付宝由 `alipay_fund_parser.py` 解析三列，东方财富由 `eastmoney_parser.py` 解析五列和账户摘要。
-- 两种来源统一经过 `parsed_to_drafts` 和中文确认表，绝不直接写库。
-- 日报用户可见列名中文化；同步技术信息默认折叠；风险雷达为五维本地规则模型。
-- 项目不构成投资建议，不接自动交易。新增截图类型时优先增加独立 parser 和坐标测试。
+- 不自动交易，不预测涨跌，不构成投资建议。
+- OCR 导入必须人工确认。
+- 不提交真实截图、SQLite、`.env`、token 或真实资产导出。
+- 当前不使用 React 重写，优先简化日常流程。
+- 前台隐藏技术细节，代码保持模块化，文档随行为变更。
 
-## v0.5.0 交接补充
-
-- `holdings_page` 是持仓、快速操作、计划、交易、复盘和设置的统一工作台。
-- `apply_holding_operation` 是快速操作纯计算边界；每次操作先写 trades，用户明确选择后才更新 holdings。
-- `import_service` 以平台+代码或平台+规范化名称匹配，批次重复保留最后一条，覆盖不删除历史表。
-- 独立计划、操作、资产配置函数暂保留用于兼容，但已从主导航移除。
-- 当前继续使用 Streamlit；React 重写的取舍见 `docs/DECISIONS.md`。
+接手顺序：先读本文件与 `PROJECT_STATE.md`，查看 `git status` 并保留用户未提交改动；运行测试后再修改。代码与文档冲突时，以当前代码和测试为准，并同步修正文档。

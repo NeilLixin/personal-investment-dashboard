@@ -1,34 +1,15 @@
-# ChatGPT Context
+# ChatGPT / Codex 接手摘要
 
-`personal-investment-dashboard` 是本地个人投资驾驶舱，项目路径为 `D:\AAA-Projects\personal-investment-dashboard`，Windows venv 建议放在 `D:\AAA-Projects\.venvs\personal-investment-dashboard`。
+`personal-investment-dashboard` 是本地个人投资驾驶舱，用于管理持仓、记录交易和计划、完成复盘、生成投资日报、提示仓位与行为风险，并通过私有 GitHub 在 Mac 与 Windows 间同步结构化数据。它不接券商、不自动交易、不预测涨跌，也不构成投资建议。
 
-技术栈：Python、Streamlit、SQLite、Pandas、Plotly、Pillow；RapidOCR 是可选依赖。入口是 `app.py`，数据库是 `data/investment_dashboard.db`。
+技术栈为 Python 3.11、Streamlit、SQLite、Pandas、Plotly、Pillow 和 pytest，RapidOCR 是可选依赖。当前不要用 React/Vue/FastAPI 重写；核心能力是 Python OCR、截图解析、本地数据库和规则计算，Streamlit 更适合继续快速迭代。
 
-主功能包括持仓、资产配置、风险雷达、买卖计划、操作日记、复盘，以及支付宝基金/理财/黄金截图导入。
-支付宝基金采用图片预处理、RapidOCR boxes、三列坐标解析和人工确认；OCR 不可用时允许普通 OCR
-或手动粘贴文本，金额始终必须人工核对。
+Mac 项目路径：`/Users/lixin/personal-investment-dashboard`，虚拟环境：`/Users/lixin/.venvs/personal-investment-dashboard`。Windows 项目路径：`D:\AAA-Projects\personal-investment-dashboard`，虚拟环境：`D:\AAA-Projects\.venvs\personal-investment-dashboard`。激活环境后运行 `python scripts/start.py`。不要修改 `trend-content-factory`。
 
-边界：不接 OpenAI API，不抓行情，不接券商，不自动交易，不保证收益。真实数据库、截图、备份、导出、`.env` 和账户信息不得提交 Git。
+当前 v0.5.0 已收口为八个入口：总览、持仓工作台、截图导入、投资日报、风险雷达、复盘中心、同步与备份、设置。持仓工作台统一处理详情、快速操作、计划、交易和复盘；快速操作默认只记录，用户明确选择后才更新持仓。
 
-接手时先读 `docs/AI_HANDOFF.md` 和 `docs/PROJECT_STATE.md`，运行 `pytest`，然后执行 `streamlit run app.py`。数据库变更要兼容旧数据；parser 变更必须补测试。
-## v0.3.0 上下文
+截图导入支持支付宝基金、东方财富和普通 OCR 回退。默认自动识别与解析，但结果必须经过中文确认表人工核对后才能入库。重复持仓按平台加代码或规范化名称覆盖，不能删除历史交易、计划和复盘。风险雷达使用仓位、收益、交易行为、复盘纪律、数据质量五个维度；日报保留风险、建议、计划和待复盘事项；同步与备份页统一管理 JSON 快照、Git 操作和数据库备份。
 
-新增 image_preprocess.py 和 alipay_fund_parser.py。支付宝专用解析器按 x 坐标区分名称、金额/
-昨日收益、持有收益/率，并按基金名 y 坐标划分行；广告、标签和底部导航会被忽略。chicang
-仅用于参考 OCR 确认导入思路，Umi-OCR 与 zocr 仅是未来备用后端候选，当前不引入其源码或依赖。
+禁止提交 `data/investment_dashboard.db`、uploads、backups、exports、`.env`、token、日志和真实截图。只有 `data/sync/portfolio_sync.json` 允许提交，它可能包含真实投资数据，因此仓库必须保持 private。文档和测试不得出现用户的具体持仓、真实金额或截图内容。
 
-# v0.2.0 上下文
-
-当前新增数据同步、投资日报、风险评分和复盘统计。可提交的数据文件仅为 `data/sync/portfolio_sync.json`；`data/investment_dashboard.db`、`data/uploads/`、`data/backups/`、`data/exports/`、截图、日志、`.env` 和 token 不提交。跨设备顺序为：拉取代码 → 启动应用 → 预览/导入；修改后导出快照 → 提交推送。项目仅做个人记录和辅助决策，不构成投资建议，不保证收益，不自动交易。
-# v0.4.0 当前上下文
-
-截图导入已经产品化：上传后自动识别支付宝基金或东方财富，解析后必须通过统一中文表格人工确认。
-普通界面隐藏 OCR 原文、box、路径和 JSON；高级调试模式保留排查能力。投资日报列名中文化，
-数据同步页面向普通用户，风险雷达使用仓位、收益、交易行为、复盘纪律、数据质量五维评分。
-这些功能只做本地记录和规则提醒，不构成投资建议，不预测行情、不自动交易。
-
-## v0.5.0 当前上下文
-
-前台已重构为八个主入口。持仓工作台承担筛选、分组、快速操作、计划、历史记录、复盘和设置；资产配置
-融入总览与风险判断；同步、GitHub 和备份合并。重复截图默认按平台范围唯一键覆盖，历史交易与计划保留。
-项目仍是 Python + Streamlit + SQLite，当前不使用 React。
+下一步重点：用脱敏样本增强两类截图 parser，提升来源识别和错误诊断，校准风险与复盘规则，继续隐藏技术字段，并补关键 UI 与数据库迁移测试。接手时先读 `docs/AI_HANDOFF.md`，查看并保留未提交改动，再运行 `python -m pytest`。代码与文档冲突时以当前代码和测试为准。
