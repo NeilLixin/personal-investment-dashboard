@@ -17,7 +17,8 @@ def risk_item(key: str, category: str, level: str, title: str, description: str,
 
 
 def evaluate_risks(holdings: Iterable[Mapping], trades: Iterable[Mapping] = (), settings: Mapping | None = None,
-                   plans: Iterable[Mapping] = (), sync_status: Mapping | None = None) -> list[dict]:
+                   plans: Iterable[Mapping] = (), sync_status: Mapping | None = None,
+                   market_snapshots: Iterable[Mapping] | None = None, **kwargs) -> list[dict]:
     records, trades, plans, settings = list(holdings), list(trades), list(plans), dict(settings or {})
     frame, risks = enrich_holdings(records), []
     add = lambda *args: risks.append(risk_item(*args))
@@ -94,6 +95,13 @@ def evaluate_risks(holdings: Iterable[Mapping], trades: Iterable[Mapping] = (), 
     if missing_risk: add("missing_risk", "数据质量风险", "yellow", "持仓缺少风险等级", "高风险资产比例无法准确计算。", f"缺少 {missing_risk} 条", "补齐风险等级。", 2)
     if sync_status and (not sync_status.get("sync_exists") or sync_status.get("possibly_out_of_sync") or sync_status.get("git_dirty")):
         add("sync_pending", "数据质量风险", "yellow", "本地数据尚未同步", "另一台设备可能不是最新数据。", "同步文件未导出或本地仍有改动", "完成导出并推送后再切换设备。", 3)
+    market_data_provided = market_snapshots is not None or "snapshots" in kwargs
+    snapshot_rows = list(market_snapshots or kwargs.get("snapshots") or ()); snapshot_ids = {row.get("holding_id") for row in snapshot_rows if row.get("holding_id")}
+    if market_data_provided and records and len(snapshot_ids) / len(records) < .5:
+        add("market_snapshot_incomplete", "数据质量风险", "yellow", "今日收益数据不完整", "风险判断可能缺少当日波动信息。", f"已更新 {len(snapshot_ids)}/{len(records)} 条", "可刷新市场快照或上传收益截图；无需据此进行交易。", 2)
+    daily_pnl = sum(safe_float(row.get("daily_pnl")) for row in snapshot_rows)
+    if market_data_provided and total and daily_pnl / total < -.02:
+        add("large_daily_loss", "收益风险", "yellow", "单日波动较大", "今日收益快照显示组合波动偏大。", f"当日收益约占资产 {daily_pnl/total:.1%}", "注意情绪交易风险，先核对快照的数据来源和完整性。", 4)
     if not risks: add("portfolio_normal", "仓位风险", "green", "风险正常", "当前未触发主要风险规则。", "风险分 0", "保持记录并按计划复盘。", 0)
     return sorted(risks, key=lambda x: ({"red": 0, "yellow": 1, "green": 2}[x["level"]], -x["score"]))
 

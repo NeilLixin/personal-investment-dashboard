@@ -9,7 +9,7 @@ BACKUPS_DIR = DATA_DIR / "backups"
 EXPORTS_DIR = DATA_DIR / "exports"
 SYNC_DIR = DATA_DIR / "sync"
 SYNC_FILE = SYNC_DIR / "portfolio_sync.json"
-APP_VERSION = "0.5.0"
+APP_VERSION = "0.7.0"
 
 ASSET_TYPES = [
     "现金",

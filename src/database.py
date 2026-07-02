@@ -46,6 +46,42 @@ CREATE TABLE IF NOT EXISTS ocr_import_batches (
 CREATE TABLE IF NOT EXISTS app_settings (
     key TEXT PRIMARY KEY, value TEXT, updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS market_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, holding_id INTEGER, platform TEXT, code TEXT, name TEXT,
+    asset_type TEXT, source TEXT NOT NULL, source_name TEXT, snapshot_date TEXT NOT NULL,
+    fetched_at TEXT NOT NULL, price REAL, previous_price REAL, nav REAL, previous_nav REAL,
+    change_pct REAL, change_amount REAL, daily_pnl REAL, daily_pnl_estimated INTEGER DEFAULT 0,
+    holding_pnl REAL, holding_return_pct REAL, market_value REAL, shares REAL,
+    currency TEXT DEFAULT 'CNY', status TEXT, quality_level TEXT, raw_payload TEXT,
+    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_market_snapshot_unique
+    ON market_snapshots(holding_id, snapshot_date, source);
+CREATE INDEX IF NOT EXISTS idx_market_snapshot_latest
+    ON market_snapshots(holding_id, snapshot_date DESC, fetched_at DESC);
+CREATE TABLE IF NOT EXISTS market_refresh_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT, source_name TEXT, started_at TEXT,
+    finished_at TEXT, status TEXT, total_holdings INTEGER DEFAULT 0, success_count INTEGER DEFAULT 0,
+    failed_count INTEGER DEFAULT 0, skipped_count INTEGER DEFAULT 0, message TEXT, error TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS screenshot_profit_import_batches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, source_name TEXT, uploaded_file_count INTEGER DEFAULT 0,
+    ocr_engine TEXT, status TEXT, raw_text TEXT, parsed_count INTEGER DEFAULT 0,
+    matched_count INTEGER DEFAULT 0, unmatched_count INTEGER DEFAULT 0, confirmed_count INTEGER DEFAULT 0,
+    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS fund_code_candidates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, code TEXT NOT NULL, short_name TEXT, full_name TEXT,
+    fund_type TEXT, market_type TEXT, source TEXT, source_name TEXT NOT NULL,
+    updated_at TEXT NOT NULL, raw_payload TEXT,
+    UNIQUE(code, source_name)
+);
+CREATE TABLE IF NOT EXISTS fund_code_match_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, holding_id INTEGER, holding_name TEXT, normalized_name TEXT,
+    matched_code TEXT, matched_name TEXT, confidence REAL, match_status TEXT,
+    candidates_json TEXT, confirmed INTEGER DEFAULT 0, created_at TEXT NOT NULL
+);
 """
 
 
@@ -85,7 +121,8 @@ def init_db(db_path: Path = DATABASE_PATH) -> None:
 
 
 def fetch_all(table: str, db_path: Path = DATABASE_PATH, order_by: str = "id DESC") -> list[dict]:
-    allowed = {"holdings", "trades", "plans", "rules", "ocr_import_batches", "app_settings"}
+    allowed = {"holdings", "trades", "plans", "rules", "ocr_import_batches", "app_settings",
+               "market_snapshots", "market_refresh_logs", "screenshot_profit_import_batches", "fund_code_candidates", "fund_code_match_logs"}
     if table not in allowed:
         raise ValueError("Unsupported table")
     with connection(db_path) as conn:
@@ -93,7 +130,8 @@ def fetch_all(table: str, db_path: Path = DATABASE_PATH, order_by: str = "id DES
 
 
 def get_row(table: str, row_id: int, db_path: Path = DATABASE_PATH) -> dict | None:
-    if table not in {"holdings", "trades", "plans", "rules", "ocr_import_batches"}:
+    if table not in {"holdings", "trades", "plans", "rules", "ocr_import_batches", "market_snapshots",
+                     "market_refresh_logs", "screenshot_profit_import_batches", "fund_code_candidates", "fund_code_match_logs"}:
         raise ValueError("Unsupported table")
     with connection(db_path) as conn:
         row = conn.execute(f"SELECT * FROM {table} WHERE id = ?", (row_id,)).fetchone()
@@ -105,7 +143,7 @@ def insert_row(table: str, data: dict[str, Any], db_path: Path = DATABASE_PATH) 
     timestamp = now_text()
     if table != "app_settings":
         payload.setdefault("created_at", timestamp)
-    if table in {"holdings", "trades", "plans", "rules"}:
+    if table in {"holdings", "trades", "plans", "rules", "market_snapshots", "screenshot_profit_import_batches"}:
         payload.setdefault("updated_at", timestamp)
     columns = ", ".join(payload)
     placeholders = ", ".join("?" for _ in payload)
@@ -116,7 +154,7 @@ def insert_row(table: str, data: dict[str, Any], db_path: Path = DATABASE_PATH) 
 
 def update_row(table: str, row_id: int, data: dict[str, Any], db_path: Path = DATABASE_PATH) -> None:
     payload = dict(data)
-    if table in {"holdings", "trades", "plans", "rules"}:
+    if table in {"holdings", "trades", "plans", "rules", "market_snapshots", "screenshot_profit_import_batches"}:
         payload["updated_at"] = now_text()
     assignments = ", ".join(f"{key} = ?" for key in payload)
     with connection(db_path) as conn:
@@ -159,7 +197,8 @@ def set_setting(key: str, value: Any, db_path: Path = DATABASE_PATH) -> None:
 
 
 def clear_tables(tables: Iterable[str], db_path: Path = DATABASE_PATH) -> None:
-    allowed = {"holdings", "trades", "plans", "rules", "ocr_import_batches", "app_settings"}
+    allowed = {"holdings", "trades", "plans", "rules", "ocr_import_batches", "app_settings",
+               "market_snapshots", "market_refresh_logs", "screenshot_profit_import_batches", "fund_code_candidates", "fund_code_match_logs"}
     with connection(db_path) as conn:
         for table in tables:
             if table not in allowed:

@@ -10,6 +10,7 @@ from src.ocr_engine import (
     normalize_ocr_result,
     normalize_rapidocr_result,
 )
+from src.profit_screenshot_parser import parse_profit_screenshot_text
 
 
 class UploadedFileStub(BytesIO):
@@ -71,3 +72,13 @@ def test_multiple_images_keep_success_when_one_fails() -> None:
     assert "识别成功" in result["text"] and "bad.png" in result["error"]
     assert result["details"]["results"][0]["items"][0]["center_x"] == pytest.approx(0.5)
     assert good.tell() == 0 and bad.tell() == 0
+
+
+def test_combined_ocr_text_can_feed_profit_parser() -> None:
+    parsed = parse_profit_screenshot_text("支付宝\n脱敏产品\n001234\n涨跌幅：+1.00%\n当日收益：+2.00")
+    assert parsed["ok"] and parsed["items"][0]["daily_pnl"] == 2
+
+
+def test_empty_ocr_text_has_friendly_profit_warning() -> None:
+    parsed = parse_profit_screenshot_text("")
+    assert not parsed["ok"] and "OCR 原文为空" in parsed["warnings"][0]

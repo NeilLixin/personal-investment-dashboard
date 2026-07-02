@@ -102,6 +102,14 @@ def import_sync_snapshot(mode: str = "preview", db_path: Path = DATABASE_PATH, s
                     stable = row.get(key_name)
                     exists = stable is not None and conn.execute(f"SELECT 1 FROM {table} WHERE {key_name} = ?", (stable,)).fetchone()
                     if exists:
+                        if table == "holdings" and "code" in row:
+                            incoming_code = str(row.get("code") or "").strip()
+                            current_code = str(conn.execute("SELECT code FROM holdings WHERE id = ?", (stable,)).fetchone()[0] or "").strip()
+                            if not incoming_code:
+                                row.pop("code", None)
+                            elif current_code and incoming_code != current_code:
+                                row.pop("code", None)
+                                result["errors"].append(f"holdings 第 {index} 条：代码冲突，已保留本地代码")
                         assignments = [key for key in row if key != key_name]
                         if assignments:
                             conn.execute(f"UPDATE {table} SET {', '.join(f'{key} = ?' for key in assignments)} WHERE {key_name} = ?", (*[row[k] for k in assignments], stable))

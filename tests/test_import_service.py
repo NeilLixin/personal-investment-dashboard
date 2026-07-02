@@ -1,5 +1,5 @@
 from src.database import fetch_all, init_db, insert_row
-from src.import_service import dedupe_import_holdings, import_holding_drafts, normalize_holding_key
+from src.import_service import dedupe_import_holdings, import_holding_drafts, normalize_holding_key, recommend_fund_codes_for_import
 
 
 def holding(name="华安基金", platform="支付宝", code="", value=100):
@@ -34,3 +34,13 @@ def test_overwrite_preserves_trades_and_plans(tmp_path):
 def test_normalized_key_uses_platform_and_code():
     assert normalize_holding_key(holding(name="A（QDII） 定投")) == normalize_holding_key(holding(name="a(QDII)"))
     assert normalize_holding_key(holding(code=" 000001 ")) != normalize_holding_key(holding(code="000002"))
+
+
+def test_import_code_recommendation_requires_confirmation_for_ambiguity():
+    candidates = [{"code":"000001","short_name":"示例成长混合基金A"}, {"code":"000002","short_name":"示例成长混合基金C"}]
+    exact = recommend_fund_codes_for_import([holding(name="示例成长混合基金A")], candidates)[0]
+    assert exact["recommended_code"] == "000001" and exact["write_recommended_code"] is True
+    ambiguous = recommend_fund_codes_for_import([holding(name="示例成长混合基金")], candidates)[0]
+    assert ambiguous["code_match_status"] == "multiple_candidates" and ambiguous["write_recommended_code"] is False
+    ocr = recommend_fund_codes_for_import([holding(name="未知", code="123456")], candidates)[0]
+    assert ocr["recommended_code"] == "123456" and ocr["code_match_status"] == "ocr_code"

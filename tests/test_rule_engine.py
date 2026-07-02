@@ -31,3 +31,15 @@ def test_five_dimension_summary_is_returned() -> None:
     summary = risk_summary(risks)
     assert set(summary["dimensions"]) == {"仓位风险", "收益风险", "交易行为风险", "复盘纪律风险", "数据质量风险"}
     assert 0 <= summary["risk_score"] <= 100
+
+
+def test_market_snapshots_are_optional_and_weakly_integrated() -> None:
+    holdings = [{"id":1,"name":"脱敏资产","asset_type":"其他","current_value":100,"cost_amount":100,"risk_level":"中"}]
+    legacy = evaluate_risks(holdings)
+    assert not any(item["risk_key"] == "market_snapshot_incomplete" for item in legacy)
+    empty = evaluate_risks(holdings, market_snapshots=[])
+    quality = next(item for item in empty if item["risk_key"] == "market_snapshot_incomplete")
+    assert quality["category"] == "数据质量风险" and "买入" not in quality["suggestion"] and "卖出" not in quality["suggestion"]
+    volatile = evaluate_risks(holdings, market_snapshots=[{"holding_id":1,"daily_pnl":-5}])
+    item = next(item for item in volatile if item["risk_key"] == "large_daily_loss")
+    assert "情绪" in item["suggestion"] and "买入" not in item["suggestion"] and "卖出" not in item["suggestion"]

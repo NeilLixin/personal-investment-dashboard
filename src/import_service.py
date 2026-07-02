@@ -9,6 +9,7 @@ import pandas as pd
 from src.calculations import calculate_profit, safe_float
 from src.config import DATABASE_PATH
 from src.database import connection, insert_row, update_row
+from src.fund_code_service import match_fund_code_by_name, normalize_fund_code
 
 IMPORT_COLUMNS = ["name", "code", "platform", "asset_type", "market", "current_value", "cost_amount", "profit_amount",
                   "profit_rate", "yesterday_profit", "holding_share", "latest_price", "target_min_ratio", "target_max_ratio",
@@ -75,6 +76,19 @@ def parsed_to_drafts(parsed: Iterable[Mapping]) -> pd.DataFrame:
             "target_max_ratio":safe_float(item.get("target_max_ratio"), 1), "risk_level":item.get("risk_level", "中"),
             "note":item.get("note", "截图导入"), "duplicate_action":"覆盖更新"})
     return pd.DataFrame(rows, columns=IMPORT_COLUMNS)
+
+
+def recommend_fund_codes_for_import(records: Iterable[Mapping], candidates: Iterable[Mapping]) -> list[dict]:
+    """Add confirmation-only recommendations; an OCR code always wins."""
+    result = []
+    for source in records:
+        row = dict(source); ocr_code = normalize_fund_code(row.get("code"))
+        match = match_fund_code_by_name(row.get("name", ""), candidates) if not ocr_code else {"status":"ocr_code", "best":None, "candidates":[], "message":"OCR 已识别代码"}
+        best = match.get("best") or {}
+        row.update({"recommended_code":ocr_code or best.get("code", ""), "recommended_name":best.get("name", ""),
+                    "code_match_status":match["status"], "write_recommended_code":bool(ocr_code or match["status"] in {"exact","high_confidence"})})
+        result.append(row)
+    return result
 
 
 def import_holding_drafts(records: Iterable[Mapping], db_path: Path = DATABASE_PATH) -> dict[str, int]:

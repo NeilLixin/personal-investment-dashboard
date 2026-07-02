@@ -17,6 +17,39 @@
 - 数据同步：把核心表导出为 `data/sync/portfolio_sync.json`，用于私有 GitHub 跨设备同步。
 - 投资日报：汇总资产、风险、计划和复盘提醒，可保存或下载 Markdown。
 - 风险与复盘：0-100 风险分、可调阈值、月度/情绪/标签统计图表。
+- 市场快照：按需拉取可选市场数据，或从第三方 App 收益截图更新今日收益；只写快照，不修改持仓和交易历史。
+
+## 市场快照 / 今日收益更新
+
+总览页会读取数据库中的上次 API 刷新时间。超过设置的间隔（默认 60 分钟）时只提示可刷新；默认不自动联网，也没有后台常驻任务。设置中可开启“页面打开时自动刷新”，用户也可以手动强制刷新。
+
+API 数据源使用可选的 AKShare。未安装、网络不可用或单只代码失败都不会影响主系统和其他持仓：
+
+```bash
+pip install akshare
+```
+
+场内 ETF 可使用盘中行情；场外基金只按净值状态展示“官方净值 / 待净值更新”，不把盘中估算称为官方实时收益。场外基金、ETF 联接和 QDII 可在“截图导入 → 今日收益截图导入”上传第三方 App 截图。OCR 文本可以修改，解析结果必须在确认表中匹配本地持仓并人工确认。
+
+收益截图只写入 `market_snapshots`，不会修改 holdings 的成本、份额或市值，也不会创建交易、计划或复盘。第三方截图仅供复盘参考，不代表官方最终净值。安装 AKShare 或 OCR 依赖后均需重启 Streamlit。
+
+如果刷新没有成功更新，请展开总览中的“市场刷新高级诊断”。每条记录会说明是缺少基金代码、暂不支持现金/黄金、AKShare 未安装，还是网络/API 查询失败。也可以运行：
+
+```bash
+python scripts/inspect_holdings_for_market_snapshot.py
+python scripts/test_market_data_fetch.py --codes 006075 159995
+```
+
+若持仓缺少代码，请进入“持仓工作台 → 基金代码补全助手”：先刷新 AKShare 候选库，再自动匹配并人工确认。名称截断、A/C 类别不明确或存在多个近似候选时不会默认写入；同步导入中的空代码也不会清除本机已有代码。
+
+命令行可使用：
+
+```bash
+python scripts/refresh_fund_code_candidates.py
+python scripts/match_missing_fund_codes.py
+```
+
+联网诊断默认不写数据库；确认后可加 `--write-db`，但只有代码匹配本地持仓时才会写入。
 
 ## 功能截图说明
 
@@ -120,6 +153,8 @@ Mac：`git pull` → `python scripts/start.py` → 页面修改数据 → “数
 Windows：`git pull` → `python scripts\start.py` → “数据同步”预览 → 选择合并或覆盖并确认导入。反向同步步骤相同。覆盖和合并导入前都会自动备份本地数据库。
 
 投资日报页点击“生成日报”，可复制、下载或保存 Markdown；风险雷达页可维护基础阈值；复盘中心可快速填写结果并查看统计图表。
+
+Mac 测试市场快照：激活 `/Users/lixin/.venvs/personal-investment-dashboard`，按需安装 `akshare` 和 `requirements-ocr.txt`，重启后运行 `python scripts/start.py`。Windows 使用对应 `.venvs\personal-investment-dashboard` 环境执行相同安装和启动步骤。
 
 后续同步：
 

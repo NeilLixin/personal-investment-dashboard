@@ -22,7 +22,15 @@ from src.database import (
     now_text, set_setting, update_row,
 )
 from src.export_service import backup_database, export_all_csv_zip
-from src.import_service import dedupe_import_holdings, import_holding_drafts, parsed_to_drafts
+from src.import_service import dedupe_import_holdings, import_holding_drafts, parsed_to_drafts, recommend_fund_codes_for_import
+from src.fund_code_service import apply_confirmed_code_matches, batch_match_missing_holding_codes, load_fund_code_candidates, refresh_fund_code_candidates
+from src.market_data_service import (
+    get_latest_market_snapshots, get_market_refresh_status, merge_holdings_with_latest_snapshots,
+    refresh_market_snapshots_for_holdings, save_market_snapshot,
+)
+from src.profit_screenshot_parser import (
+    build_market_snapshot_from_profit_item, match_profit_items_to_holdings, parse_profit_screenshot_text, recommend_profit_item_codes,
+)
 from src.image_preprocess import (
     crop_alipay_fund_area,
     load_image_from_uploaded_file,
@@ -33,7 +41,7 @@ from src.image_preprocess import (
 from src.git_service import run_git_action
 from src.ocr_engine import LocalOCREngine
 from src.rule_engine import evaluate_risks, risk_summary, system_suggestions
-from src.report_service import generate_daily_report, localize_records, save_daily_report
+from src.report_service import default_market_snapshot, generate_daily_report, localize_records, save_daily_report
 from src.review_service import (
     generate_review_insights, get_emotion_stats, get_mistake_tag_stats,
     get_monthly_review_stats, get_review_summary, get_success_tag_stats,
@@ -45,7 +53,13 @@ from src.ui_components import PLOTLY_CONFIG, inject_css, metric_card, money_metr
 
 st.set_page_config(page_title="个人投资驾驶舱", page_icon="🧭", layout="wide", initial_sidebar_state="expanded")
 ensure_directories()
-init_db()
+try:
+    init_db()
+except Exception as database_error:
+    st.error("本地数据库升级失败。请先备份 data/investment_dashboard.db，再检查文件权限或迁移错误。")
+    with st.expander("数据库升级诊断"):
+        st.code(f"{type(database_error).__name__}: {database_error}")
+    st.stop()
 inject_css()
 
 
@@ -71,6 +85,33 @@ def holdings_data() -> tuple[list[dict], pd.DataFrame]:
     return records, enrich_holdings(records)
 
 
+def market_snapshot_settings() -> dict:
+    defaults = {"check_on_open":True, "auto_refresh":False, "min_interval_minutes":60, "api_source":"akshare",
+                "screenshot_priority":True, "show_holding_columns":True, "show_in_report":True}
+    return {**defaults, **(get_setting("market_snapshot_settings", {}) or {})}
+
+
+def market_snapshot_summary(records: list[dict]) -> dict:
+    settings = market_snapshot_settings(); snapshots = get_latest_market_snapshots(screenshot_priority=settings["screenshot_priority"])
+    matched_ids = {row.get("holding_id") for row in snapshots if row.get("holding_id")}
+    sources = {row.get("source") for row in snapshots}; source = "混合" if len(sources) > 1 else "第三方截图" if "screenshot" in sources else "API" if "market_api" in sources else "暂无"
+    quality = {row.get("quality_level") for row in snapshots}
+    quality_text = "部分缺失" if len(matched_ids) < len(records) else "第三方估算" if "third_party_estimate" in quality else "盘中行情" if "realtime_quote" in quality else "官方净值" if quality == {"official_nav"} else "部分缺失"
+    latest = max((str(row.get("fetched_at") or "") for row in snapshots), default="")
+    return {"snapshots":snapshots, "daily_pnl":sum(safe_float(row.get("daily_pnl")) for row in snapshots), "matched":len(matched_ids),
+            "unmatched":max(0, len(records)-len(matched_ids)), "source":source, "quality":quality_text, "latest":latest}
+
+
+def maybe_auto_refresh_market(records: list[dict]) -> None:
+    settings = market_snapshot_settings()
+    if not settings["check_on_open"]: return
+    status = get_market_refresh_status(min_interval_minutes=int(settings["min_interval_minutes"]))
+    marker = f"{date.today()}-{status.get('last_refreshed_at')}"
+    if status["is_stale"] and settings["auto_refresh"] and st.session_state.get("market_auto_attempt") != marker:
+        st.session_state["market_auto_attempt"] = marker
+        st.session_state["market_refresh_result"] = refresh_market_snapshots_for_holdings(records)
+
+
 def save_holding(payload: dict, holding_id: int | None = None) -> None:
     profit, rate = calculate_profit(payload["current_value"], payload["cost_amount"], payload.get("profit_amount"))
     payload["profit_amount"] = profit
@@ -86,6 +127,8 @@ def dashboard_page() -> None:
     records, frame = holdings_data()
     trades = fetch_all("trades", order_by="trade_date DESC, id DESC")
     summary = portfolio_summary(records)
+    maybe_auto_refresh_market(records)
+    market = market_snapshot_summary(records)
     due_reviews = [row for row in trades if row.get("review_date") and row["review_date"] <= date.today().isoformat() and not (row.get("review_result") or "").strip()]
     over_count = int((frame.get("allocation_status", pd.Series(dtype=str)) == "超配").sum()) if not frame.empty else 0
     under_count = int((frame.get("allocation_status", pd.Series(dtype=str)) == "低配").sum()) if not frame.empty else 0
@@ -99,6 +142,30 @@ def dashboard_page() -> None:
     with cards[1]: metric_card("今日待复盘", str(len(due_reviews)))
     with cards[2]: metric_card("超配 / 低配", f"{over_count} / {under_count}")
     with cards[3]: metric_card("持仓数量", str(len(records)))
+    st.subheader("今日收益快照")
+    mc = st.columns(5)
+    with mc[0]: money_metric("今日收益合计", market["daily_pnl"], signed=True)
+    with mc[1]: metric_card("已更新持仓", str(market["matched"]))
+    with mc[2]: metric_card("待更新持仓", str(market["unmatched"]))
+    with mc[3]: metric_card("数据来源", market["source"])
+    with mc[4]: metric_card("数据质量", market["quality"])
+    refresh_status = get_market_refresh_status(min_interval_minutes=int(market_snapshot_settings()["min_interval_minutes"]))
+    if refresh_status["is_stale"]: st.warning("市场快照已超过 1 小时未更新。自动市场数据不可用时，可上传第三方 App 收益截图更新。")
+    elif refresh_status["minutes_since_refresh"] is not None: st.caption(f"上次 API 更新：{refresh_status['minutes_since_refresh']:.0f} 分钟前")
+    if "screenshot" in {row.get("source") for row in market["snapshots"]}: st.caption("今日收益快照来自第三方截图，仅用于复盘参考，不代表官方最终净值。")
+    if st.button("刷新市场快照", help="频繁刷新可能被数据源限制。", key="dashboard_market_refresh"):
+        st.session_state["market_refresh_result"] = refresh_market_snapshots_for_holdings(records, force=True); st.rerun()
+    if st.session_state.get("market_refresh_result"):
+        result = st.session_state["market_refresh_result"]
+        st.caption(f"刷新结果：成功 {result.get('success_count',0)}，失败 {result.get('failed_count',0)}，跳过 {result.get('skipped_count',0)}。")
+        if not result.get("success_count"):
+            st.warning(result.get("error") or result.get("message") or "本次没有成功更新，查看高级诊断了解原因。")
+        with st.expander("市场刷新高级诊断"):
+            st.write("数据源状态", result.get("provider"))
+            st.write("失败项目", result.get("failed_items", []))
+            st.write("跳过项目", result.get("skipped_items", []))
+            st.write("最近刷新日志", fetch_all("market_refresh_logs")[:5])
+            if result.get("error"): st.code(str(result["error"]))
     if frame.empty:
         st.info("暂无持仓。可以先到“数据备份/设置”初始化 demo 数据，或前往“持仓管理”录入。")
         return
@@ -169,6 +236,10 @@ def holdings_page() -> None:
     page_header("📦 持仓工作台", "查看组合、记录操作、管理计划和调整持仓设置。")
     show_flash()
     records, frame = holdings_data()
+    merged_snapshots = merge_holdings_with_latest_snapshots(records)
+    snapshot_columns = [column for column in merged_snapshots.columns if column.startswith("snapshot_")]
+    if not frame.empty and snapshot_columns:
+        frame = frame.merge(merged_snapshots[["id", *snapshot_columns]], on="id", how="left")
     trades = fetch_all("trades", order_by="trade_date DESC, id DESC")
     summary = portfolio_summary(records); risks = evaluate_risks(records, trades)
     pending = [row for row in trades if row.get("review_status", "pending") == "pending" and not row.get("review_result")]
@@ -177,6 +248,33 @@ def holdings_page() -> None:
               format_rate(summary["cash_ratio"]), str(len(records)), str(sum(r["level"] == "red" for r in risks)), str(len(pending))]
     for col, label, value in zip(cards, ["总资产", "总浮盈亏", "总收益率", "现金比例", "持仓数量", "红色风险", "待复盘"], values):
         with col: metric_card(label, value)
+    missing_codes = [row for row in records if not str(row.get("code") or "").strip()]
+    with st.expander("🔎 基金代码补全助手", expanded=bool(missing_codes)):
+        candidates = load_fund_code_candidates()
+        latest = max((str(row.get("updated_at") or "") for row in candidates), default="尚未刷新")
+        st.caption(f"持仓 {len(records)} 条 · 缺少代码 {len(missing_codes)} 条 · 候选 {len(candidates)} 条 · 最近更新 {latest}")
+        st.info("代码只会在确认后写入；名称截断、A/C 类别不明确或多个近似候选不会自动勾选。")
+        refresh_col, match_col = st.columns(2)
+        if refresh_col.button("刷新基金代码候选库", width="stretch", key="refresh_fund_candidates"):
+            with st.spinner("正在从 AKShare 更新基金候选库……"): result = refresh_fund_code_candidates(force=True)
+            if result["ok"]: st.success(f"候选库已更新，共 {result['total']} 条。")
+            else: st.error("候选库刷新失败：" + "；".join(result.get("errors") or ["未知错误"]))
+        if match_col.button("自动匹配缺失代码", disabled=not missing_codes, width="stretch", key="match_missing_codes"):
+            st.session_state["fund_code_matches"] = batch_match_missing_holding_codes(records)
+        batch = st.session_state.get("fund_code_matches")
+        if batch:
+            st.write(f"完全匹配 {batch['exact_count']} · 高置信 {batch['high_confidence_count']} · 多候选 {batch['multiple_count']} · 低置信 {batch['low_confidence_count']} · 未匹配 {batch['no_match_count']}")
+            rows = [{"是否写入":item["default_selected"], "持仓ID":item["holding_id"], "平台":item.get("platform"), "本地持仓名称":item["holding_name"], "当前代码":item.get("current_code", ""),
+                "推荐代码":item["recommended_code"], "推荐名称":item["recommended_name"], "基金类型":item.get("fund_type"), "置信度":item["confidence"],
+                "匹配状态":item["status"], "其他候选":"；".join(f"{x['code']} {x['name']} ({x['confidence']:.0%})" for x in item.get("candidates", [])[:3]), "匹配原因":item["reason"], "备注":"请人工确认"}
+                for item in batch["items"]]
+            edited_codes = st.data_editor(pd.DataFrame(rows), hide_index=True, width="stretch", key="fund_code_editor",
+                disabled=["持仓ID","平台","本地持仓名称","当前代码","推荐名称","基金类型","置信度","匹配状态","其他候选","匹配原因"], column_config={"置信度":st.column_config.NumberColumn(format="%.0%%")})
+            if st.button("保存已确认代码", type="primary", key="save_confirmed_codes"):
+                confirmations = [{"confirmed":row["是否写入"], "holding_id":row["持仓ID"], "recommended_code":row["推荐代码"], "holding_name":row["本地持仓名称"],
+                    "recommended_name":row["推荐名称"], "confidence":row["置信度"], "status":row["匹配状态"]} for row in edited_codes.to_dict("records")]
+                saved = apply_confirmed_code_matches(confirmations)
+                rerun_with_message(f"基金代码补全完成：写入 {saved['updated']}，跳过 {saved['skipped']}，冲突 {saved['conflicts']}，失败 {saved['failed']}。")
     with st.expander("➕ 新增持仓", expanded=not records):
         payload = holding_form("add_holding")
         if payload:
@@ -195,17 +293,23 @@ def holdings_page() -> None:
     if frame.empty:
         st.info("暂无持仓，请先手动新增或上传截图导入。")
         return
-    c1, c2, c3, c4, c5 = st.columns(5)
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
     platform_filter = c1.multiselect("平台筛选", sorted(frame["platform"].dropna().unique()))
     type_filter = c2.multiselect("资产类型筛选", sorted(frame["asset_type"].dropna().unique()))
     risk_filter = c3.multiselect("风险等级", RISK_LEVELS)
     profit_filter = c4.selectbox("盈亏状态", ["全部", "盈利", "亏损", "持平"])
     sort_key = c5.selectbox("排序", ["当前市值", "浮盈亏", "收益率", "持仓占比"])
+    snapshot_filter = c6.selectbox("今日快照", ["全部", "今日上涨", "今日下跌", "未更新", "第三方截图", "API"])
     display = frame.copy()
     if platform_filter: display = display[display["platform"].isin(platform_filter)]
     if type_filter: display = display[display["asset_type"].isin(type_filter)]
     if risk_filter: display = display[display["risk_level"].isin(risk_filter)]
     if profit_filter != "全部": display = display[(display["profit_amount"] > 0) if profit_filter == "盈利" else (display["profit_amount"] < 0) if profit_filter == "亏损" else (display["profit_amount"] == 0)]
+    if snapshot_filter == "今日上涨": display = display[display.get("snapshot_change_pct", pd.Series(index=display.index, dtype=float)).fillna(0) > 0]
+    elif snapshot_filter == "今日下跌": display = display[display.get("snapshot_change_pct", pd.Series(index=display.index, dtype=float)).fillna(0) < 0]
+    elif snapshot_filter == "未更新": display = display[display.get("snapshot_fetched_at", pd.Series(index=display.index, dtype=object)).isna()]
+    elif snapshot_filter == "第三方截图": display = display[display.get("snapshot_source", pd.Series(index=display.index, dtype=object)) == "screenshot"]
+    elif snapshot_filter == "API": display = display[display.get("snapshot_source", pd.Series(index=display.index, dtype=object)) == "market_api"]
     display = display.sort_values({"当前市值":"current_value", "浮盈亏":"profit_amount", "收益率":"profit_rate", "持仓占比":"asset_ratio"}[sort_key], ascending=False)
     category_tabs = st.tabs(["全部持仓", "A股", "海外", "黄金", "现金/固收", "高风险"])
     tab_frames = [display, display[display["market"] == "A股"], display[display["asset_type"] == "海外资产"], display[display["asset_type"] == "黄金"],
@@ -217,14 +321,34 @@ def holdings_page() -> None:
                 shown = tab_frame[["name", "platform", "asset_type", "current_value", "cost_amount", "profit_amount", "profit_rate", "holding_share", "latest_price", "asset_ratio", "risk_level", "display_status", "allocation_status"]].copy()
                 shown.columns = ["名称", "平台", "资产类型", "当前市值", "成本金额", "浮盈亏", "收益率", "持有份额", "最新价", "持仓占比", "风险等级", "状态", "配置状态"]
                 shown.insert(7, "昨日/今日收益", tab_frame.get("daily_profit"))
+                if market_snapshot_settings()["show_holding_columns"]:
+                    shown["今日涨跌幅"] = tab_frame.get("snapshot_change_pct")
+                    shown["今日收益"] = tab_frame.get("snapshot_daily_pnl")
+                    shown["最新值"] = tab_frame.get("snapshot_latest_value")
+                    shown["快照时间"] = tab_frame.get("snapshot_fetched_at")
+                    shown["快照来源"] = tab_frame.get("snapshot_source").map({"screenshot":"第三方截图", "market_api":"API", "manual":"手动"}) if "snapshot_source" in tab_frame else None
+                    shown["数据状态"] = tab_frame.get("snapshot_status")
                 shown["操作"] = "在下方选择持仓"
-                st.dataframe(shown, width="stretch", hide_index=True, column_config={"当前市值":st.column_config.NumberColumn(format="¥%.2f"), "成本金额":st.column_config.NumberColumn(format="¥%.2f"), "浮盈亏":st.column_config.NumberColumn(format="%+.2f"), "收益率":st.column_config.NumberColumn(format="%+.2%%"), "持仓占比":st.column_config.NumberColumn(format="%.2%%")})
+                st.dataframe(shown, width="stretch", hide_index=True, column_config={"当前市值":st.column_config.NumberColumn(format="¥%.2f"), "成本金额":st.column_config.NumberColumn(format="¥%.2f"), "浮盈亏":st.column_config.NumberColumn(format="%+.2f"), "收益率":st.column_config.NumberColumn(format="%+.2%%"), "持仓占比":st.column_config.NumberColumn(format="%.2%%"), "今日涨跌幅":st.column_config.NumberColumn(format="%+.2%%"), "今日收益":st.column_config.NumberColumn(format="%+.2f")})
     st.subheader("持仓详情")
     choices = {f"#{row['id']} {row['name']}": int(row["id"]) for row in records}
     selected_label = st.selectbox("选择要操作的持仓", list(choices))
     selected_id = choices[selected_label]
     initial = get_row("holdings", selected_id)
-    quick_tab, plan_tab, trade_tab, review_tab, setting_tab = st.tabs(["快速操作", "买卖计划", "操作记录", "复盘记录", "持仓设置"])
+    snapshot_tab, quick_tab, plan_tab, trade_tab, review_tab, setting_tab = st.tabs(["今日收益快照", "快速操作", "买卖计划", "操作记录", "复盘记录", "持仓设置"])
+    with snapshot_tab:
+        snapshot = next((row for row in get_latest_market_snapshots() if row.get("holding_id") == selected_id), None)
+        if snapshot:
+            sc = st.columns(5)
+            with sc[0]: rate_metric("今日涨跌幅", safe_float(snapshot.get("change_pct")), signed=True)
+            with sc[1]: money_metric("今日收益", safe_float(snapshot.get("daily_pnl")), signed=True)
+            with sc[2]: money_metric("持有收益", safe_float(snapshot.get("holding_pnl")), signed=True)
+            with sc[3]: metric_card("数据来源", "第三方截图" if snapshot.get("source") == "screenshot" else "API" if snapshot.get("source") == "market_api" else "手动")
+            with sc[4]: metric_card("更新时间", str(snapshot.get("fetched_at") or ""))
+            st.caption("场外基金净值通常不是盘中实时官方数据；第三方估算仅供复盘参考。")
+            with st.expander("高级信息"): st.write({"快照记录":snapshot.get("id"), "来源":snapshot.get("source_name"), "状态":snapshot.get("status")})
+        else:
+            st.info("暂无今日收益快照，可以刷新市场数据或上传第三方 App 收益截图。")
     with quick_tab:
         with st.form(f"quick_operation_{selected_id}"):
             c1, c2, c3, c4 = st.columns(4); action = c1.selectbox("操作类型", TRADE_ACTIONS); amount = c2.number_input("金额", min_value=0.0); quantity = c3.number_input("数量/份额", min_value=0.0); price = c4.number_input("价格", min_value=0.0, format="%.4f")
@@ -278,9 +402,7 @@ def holdings_page() -> None:
         if st.button("删除所选持仓", type="secondary"): delete_row("holdings", selected_id); rerun_with_message("持仓已删除。")
 
 
-def screenshot_import_page() -> None:
-    page_header("🖼️ 截图导入", "上传后自动识别并生成待确认表格；确认前不会写入持仓。")
-    show_flash()
+def holdings_screenshot_import_panel() -> None:
     advanced = st.toggle("高级调试模式", value=False)
     engine = get_local_ocr_engine()
     status = engine.status
@@ -370,14 +492,16 @@ def screenshot_import_page() -> None:
             st.session_state["ocr_drafts"] = parsed_to_drafts(parse_alipay_text(manual_text))
     drafts = st.session_state.get("ocr_drafts")
     if isinstance(drafts, pd.DataFrame) and not drafts.empty:
+        recommended = recommend_fund_codes_for_import(drafts.to_dict("records"), load_fund_code_candidates())
+        drafts = pd.DataFrame(recommended)
         if st.session_state.get("ocr_duplicate_count"): st.warning("本次导入发现重复持仓，已默认使用最后一次识别结果。")
         st.subheader("待确认导入表格")
-        display = drafts.rename(columns={"name":"名称", "code":"代码", "platform":"平台", "asset_type":"资产类型", "market":"市场",
+        display = drafts.rename(columns={"name":"名称", "code":"代码", "recommended_code":"推荐基金代码", "recommended_name":"推荐基金名称", "code_match_status":"代码匹配状态", "write_recommended_code":"是否写入代码", "platform":"平台", "asset_type":"资产类型", "market":"市场",
             "current_value":"当前市值", "cost_amount":"成本金额", "profit_amount":"浮盈亏", "profit_rate":"收益率",
             "yesterday_profit":"昨日/今日收益", "holding_share":"份额", "latest_price":"最新价", "risk_level":"风险等级",
             "note":"备注", "duplicate_action":"导入策略"})
         display.insert(0, "选择", True)
-        visible = ["选择", "名称", "代码", "平台", "资产类型", "市场", "当前市值", "成本金额", "浮盈亏", "收益率", "昨日/今日收益", "份额", "最新价", "风险等级", "备注", "导入策略"]
+        visible = ["选择", "名称", "代码", "推荐基金代码", "推荐基金名称", "代码匹配状态", "是否写入代码", "平台", "资产类型", "市场", "当前市值", "成本金额", "浮盈亏", "收益率", "昨日/今日收益", "份额", "最新价", "风险等级", "备注", "导入策略"]
         edited = st.data_editor(
             display[visible], width="stretch", num_rows="dynamic", key="ocr_editor",
             column_config={
@@ -393,9 +517,78 @@ def screenshot_import_page() -> None:
                        "成本金额":"cost_amount", "浮盈亏":"profit_amount", "收益率":"profit_rate", "昨日/今日收益":"yesterday_profit",
                        "份额":"holding_share", "最新价":"latest_price", "风险等级":"risk_level", "备注":"note", "导入策略":"duplicate_action"}
             selected = edited[edited["选择"]].drop(columns=["选择"]).rename(columns=reverse)
+            selected["code"] = selected.apply(lambda row: row.get("code") or (row.get("推荐基金代码") if row.get("是否写入代码") else ""), axis=1)
             result = import_holding_drafts(selected.fillna("").to_dict("records"))
             st.session_state.pop("ocr_drafts", None)
             rerun_with_message(f"导入完成：新增 {result['inserted']}，覆盖更新 {result['updated']}，跳过 {result['skipped']}，失败 {result['failed']}。")
+
+
+def profit_screenshot_import_panel() -> None:
+    st.info("本次只更新今日收益快照，不会修改持仓成本、交易记录、买卖计划或复盘。第三方估算仅供复盘参考。")
+    engine = get_local_ocr_engine(); holdings = fetch_all("holdings")
+    if not engine.status.available: st.warning("本地 OCR 不可用，可安装 OCR 依赖后重启，或直接粘贴第三方 App 识别出的文字。")
+    files = st.file_uploader("上传实时收益 / 当日收益截图（可多选）", type=["png","jpg","jpeg","webp"], accept_multiple_files=True, key="profit_snapshot_files")
+    if files:
+        st.write(f"已上传 {len(files)} 张截图")
+        cols = st.columns(min(3, len(files)))
+        for index, file in enumerate(files): cols[index % len(cols)].image(file.getvalue(), caption=file.name, width="stretch")
+    if st.button("识别收益截图", disabled=not bool(files), type="primary"):
+        result = engine.recognize_images(files or []); st.session_state["profit_ocr_result"] = result
+        if result.get("text"): st.session_state["profit_ocr_text"] = result["text"]
+        if result.get("error"): st.warning(result["error"])
+    st.session_state.setdefault("profit_ocr_text", "")
+    raw_text = st.text_area("OCR 原文（可编辑，也可手动粘贴）", key="profit_ocr_text", height=240)
+    if st.button("解析今日收益", disabled=not raw_text.strip()):
+        parsed = parse_profit_screenshot_text(raw_text); recommended = recommend_profit_item_codes(parsed["items"], load_fund_code_candidates()); matched = match_profit_items_to_holdings(recommended, holdings)
+        st.session_state["profit_parsed"] = parsed; st.session_state["profit_matched"] = matched
+        batch_id = insert_row("screenshot_profit_import_batches", {"source_name":parsed["source"], "uploaded_file_count":len(files or []),
+            "ocr_engine":engine.status.engine, "status":"parsed", "raw_text":raw_text, "parsed_count":len(matched),
+            "matched_count":sum(bool(x.get("holding_id")) for x in matched), "unmatched_count":sum(not x.get("holding_id") for x in matched), "confirmed_count":0})
+        st.session_state["profit_batch_id"] = batch_id
+    parsed = st.session_state.get("profit_parsed"); matched = st.session_state.get("profit_matched", [])
+    if parsed:
+        for warning in parsed.get("warnings", []): st.warning(warning)
+    if matched:
+        options = {"未选择":None, **{f"#{h['id']} {h['name']}":h["id"] for h in holdings}}
+        id_to_label = {value:key for key,value in options.items() if value is not None}
+        rows = []
+        for item in matched:
+            rows.append({"是否导入":bool(item.get("holding_id")), "匹配状态":item["match_status"], "本地持仓":id_to_label.get(item.get("holding_id"), "未选择"),
+                "基金代码":item.get("code"), "基金名称":item.get("name"), "最新值":item.get("latest_nav"), "涨跌幅":item.get("change_pct"),
+                "推荐代码":item.get("recommended_code"), "补全本地代码":False, "当日收益":item.get("daily_pnl"), "持有收益":item.get("holding_pnl"), "持有收益率":item.get("holding_return_pct"),
+                "资产金额":item.get("market_value"), "数据来源":parsed["source"], "质量":"第三方估算", "备注":"请人工确认"})
+        edited = st.data_editor(pd.DataFrame(rows), hide_index=True, width="stretch", key="profit_snapshot_editor",
+            column_config={"本地持仓":st.column_config.SelectboxColumn(options=list(options)), "涨跌幅":st.column_config.NumberColumn(format="%+.2%%"),
+                "持有收益率":st.column_config.NumberColumn(format="%+.2%%"), "当日收益":st.column_config.NumberColumn(format="%+.2f"), "持有收益":st.column_config.NumberColumn(format="%+.2f"), "资产金额":st.column_config.NumberColumn(format="¥%.2f")},
+            disabled=["匹配状态","基金代码","基金名称","数据来源","质量"])
+        if st.button("确认写入今日收益快照", type="primary"):
+            imported = skipped = unmatched = 0
+            source_items = {str(item.get("code")):item for item in matched}
+            holding_map = {h["id"]:h for h in holdings}
+            for row in edited.to_dict("records"):
+                holding_id = options.get(row["本地持仓"])
+                if not row["是否导入"]: skipped += 1; continue
+                if not holding_id: unmatched += 1; continue
+                item = {**source_items.get(str(row["基金代码"]), {}), "latest_nav":row["最新值"], "change_pct":row["涨跌幅"],
+                    "daily_pnl":row["当日收益"], "holding_pnl":row["持有收益"], "holding_return_pct":row["持有收益率"], "market_value":row["资产金额"]}
+                save_market_snapshot(build_market_snapshot_from_profit_item(item, holding_map[holding_id], parsed["source"])); imported += 1
+                if row.get("补全本地代码") and not holding_map[holding_id].get("code"):
+                    apply_confirmed_code_matches([{"holding_id":holding_id, "recommended_code":row.get("推荐代码"), "confirmed":True}])
+            batch_id = st.session_state.get("profit_batch_id")
+            if batch_id: update_row("screenshot_profit_import_batches", batch_id, {"status":"confirmed", "confirmed_count":imported, "unmatched_count":unmatched})
+            account = parsed.get("account", {}); local_total = sum(safe_float(h.get("current_value")) for h in holdings)
+            screenshot_total = safe_float(account.get("total_assets"))
+            if screenshot_total and local_total and abs(screenshot_total-local_total)/local_total > .1:
+                st.warning("截图账户资产与本地持仓合计不一致，请确认是否只截取了部分账户或部分平台。")
+            st.success(f"成功导入 {imported} 条，未匹配 {unmatched} 条，跳过 {skipped} 条。本次截图总资产 {format_currency(screenshot_total)}，当日总收益 {format_currency(account.get('daily_pnl') or 0, True)}。")
+
+
+def screenshot_import_page() -> None:
+    page_header("🖼️ 截图导入", "持仓截图用于更新持仓；收益截图只写入今日收益快照。")
+    show_flash()
+    holding_tab, profit_tab = st.tabs(["持仓截图导入", "今日收益截图导入"])
+    with holding_tab: holdings_screenshot_import_panel()
+    with profit_tab: profit_screenshot_import_panel()
 
 
 def plans_page() -> None:
@@ -594,7 +787,7 @@ def risk_page() -> None:
     settings = get_setting("risk_thresholds", defaults)
     settings["enabled_plan_count"] = sum(p.get("enabled", 1) for p in fetch_all("plans"))
     plans = fetch_all("plans")
-    risks = evaluate_risks(records, trades, settings, plans, get_sync_status())
+    risks = evaluate_risks(records, trades, settings, plans, get_sync_status(), market_snapshots=get_latest_market_snapshots())
     status = risk_summary(risks)
     c1, c2, c3, c4, c5 = st.columns(5)
     with c1: metric_card("总风险分", str(status["risk_score"]))
@@ -654,6 +847,22 @@ def daily_report_page() -> None:
     with cards[1]: money_metric("总浮盈亏", o["total_profit"], signed=True)
     with cards[2]: rate_metric("现金比例", o["cash_ratio"])
     with cards[3]: metric_card("风险分", str(report["risk_summary"]["risk_score"]))
+    if market_snapshot_settings()["show_in_report"]:
+        market = {**default_market_snapshot(len(fetch_all("holdings"))), **(report.get("market_snapshot") or {})}
+        st.subheader("今日市场快照")
+        mc = st.columns(3)
+        with mc[0]: money_metric("今日收益合计", market["total_daily_pnl"], signed=True)
+        with mc[1]: metric_card("已更新", str(market["matched_count"]))
+        with mc[2]: metric_card("未更新", str(market["missing_count"]))
+        st.caption(f"数据来源：{market['source_label']} · 最新更新时间：{market['updated_at'] or '暂无'}")
+        st.caption("今日收益快照仅供复盘参考，不代表官方最终净值。")
+        if not market["available"]: st.info(market["message"])
+        if market["available"]:
+            with st.expander("查看涨跌与当日亏损排行"):
+                rows = []
+                for label, values in (("涨幅居前",market["top_gainers"]),("跌幅居前",market["top_losers"]),("当日亏损居前",market["top_daily_losses"])):
+                    rows.extend({"类别":label,"名称":x.get("name"),"涨跌幅":x.get("change_pct"),"当日收益":x.get("daily_pnl")} for x in values)
+                st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch", column_config={"涨跌幅":st.column_config.NumberColumn(format="%+.2%%"),"当日收益":st.column_config.NumberColumn(format="%+.2f")})
     if report["allocations"]:
         allocation = pd.DataFrame(report["allocations"])
         st.plotly_chart(px.pie(allocation, names="asset_type", values="amount", hole=.5, title="资产配置"), width="stretch", config=PLOTLY_CONFIG)
@@ -728,6 +937,23 @@ def settings_page() -> None:
     with c1: metric_card("当前版本", APP_VERSION)
     with c2: metric_card("数据存储", "本机本地")
     with c3: metric_card("OCR 状态", "🟢 可用" if engine.status.available else "🟡 未安装")
+    st.subheader("市场快照设置")
+    market_settings = market_snapshot_settings()
+    with st.form("market_snapshot_settings_form"):
+        check_on_open = st.checkbox("页面打开时检查市场快照状态", value=market_settings["check_on_open"])
+        auto_refresh = st.checkbox("页面打开时自动刷新市场快照", value=market_settings["auto_refresh"], help="默认关闭，避免页面打开变慢。")
+        c1, c2 = st.columns(2)
+        interval = c1.number_input("最小刷新间隔（分钟）", min_value=15, max_value=1440, value=int(market_settings["min_interval_minutes"]))
+        api_source = c2.selectbox("API 数据源", ["akshare"], index=0)
+        screenshot_priority = st.checkbox("第三方截图优先于 API", value=market_settings["screenshot_priority"])
+        show_columns = st.checkbox("在持仓表格展示今日收益列", value=market_settings["show_holding_columns"])
+        show_report = st.checkbox("在投资日报展示今日市场快照", value=market_settings["show_in_report"])
+        if st.form_submit_button("保存市场快照设置"):
+            set_setting("market_snapshot_settings", {"check_on_open":check_on_open, "auto_refresh":auto_refresh,
+                "min_interval_minutes":interval, "api_source":api_source, "screenshot_priority":screenshot_priority,
+                "show_holding_columns":show_columns, "show_in_report":show_report})
+            rerun_with_message("市场快照设置已保存。")
+    st.caption("AKShare 是可选能力；未安装或网络不可用时，仍可通过第三方 App 收益截图更新。场外基金净值通常不是盘中实时官方数据。")
     st.subheader("数据操作")
     c1, c2 = st.columns(2)
     if c1.button("初始化 demo 数据", width="stretch"):
